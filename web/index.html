@@ -56,49 +56,92 @@
     </div>
 
     <section class="view is-active" id="view-stats">
+      <div class="range-bar">
+        <div class="seg" id="rangeSeg">
+          <button data-range="today">今天</button>
+          <button data-range="week">本周</button>
+          <button data-range="month">本月</button>
+          <button data-range="year">今年</button>
+          <button data-range="all" class="is-on">全部</button>
+        </div>
+        <span class="range-hint" id="rangeHint">—</span>
+      </div>
+
       <div class="kpis">
         <div class="kpi">
-          <span class="kpi-label">累计阅读</span>
+          <span class="kpi-label">阅读时长</span>
           <b class="kpi-value" id="kpiTotal">—</b>
           <span class="kpi-foot" id="kpiTotalFoot">—</span>
         </div>
         <div class="kpi">
-          <span class="kpi-label">本周阅读</span>
-          <b class="kpi-value" id="kpiWeek">—</b>
-          <span class="kpi-foot" id="kpiWeekFoot">—</span>
+          <span class="kpi-label">翻页次数</span>
+          <b class="kpi-value" id="kpiPages">—</b>
+          <span class="kpi-foot" id="kpiPagesFoot">—</span>
         </div>
         <div class="kpi">
-          <span class="kpi-label">连续阅读</span>
-          <b class="kpi-value" id="kpiStreak">—</b>
-          <span class="kpi-foot" id="kpiStreakFoot">—</span>
+          <span class="kpi-label">活跃天数</span>
+          <b class="kpi-value" id="kpiDays">—</b>
+          <span class="kpi-foot" id="kpiDaysFoot">—</span>
         </div>
         <div class="kpi">
-          <span class="kpi-label">读过的书</span>
-          <b class="kpi-value" id="kpiBooks">—</b>
-          <span class="kpi-foot" id="kpiBooksFoot">—</span>
+          <span class="kpi-label">平均速度</span>
+          <b class="kpi-value" id="kpiSpeed">—</b>
+          <span class="kpi-foot" id="kpiSpeedFoot">—</span>
         </div>
       </div>
 
       <div class="card">
         <div class="card-head">
-          <h2>阅读日历</h2>
-          <span class="card-hint" id="calHint">近 12 个月</span>
+          <div>
+            <h2>日历视图</h2>
+            <p class="card-sub" id="calSummary">—</p>
+          </div>
+          <div class="cal-nav">
+            <button class="icon-btn" id="calPrev" aria-label="上个月">‹</button>
+            <b id="calTitle">—</b>
+            <button class="icon-btn" id="calNext" aria-label="下个月">›</button>
+            <button class="btn btn-mini" id="calToday">回到本月</button>
+          </div>
         </div>
-        <div class="chart chart-cal" id="calChart"></div>
+        <div class="cal-weekhead" id="calWeekHead"></div>
+        <div class="cal-wrap">
+          <div class="cal-grid" id="calGrid"></div>
+          <div class="cal-spans" id="calSpans"></div>
+        </div>
+        <div class="cal-foot">
+          <div class="cal-legend" id="calLegend"></div>
+          <span class="cal-hint">每格底部 24 根细柱 = 该小时阅读量 · 彩色条 = 同一本书连续阅读跨天相连 · 每天最多 3 本</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <div>
+            <h2>时间轴</h2>
+            <p class="card-sub" id="tlSummary">—</p>
+          </div>
+          <div class="cal-nav">
+            <button class="icon-btn" id="tlPrev" aria-label="前一天">‹</button>
+            <b id="tlDate">—</b>
+            <button class="icon-btn" id="tlNext" aria-label="后一天">›</button>
+            <button class="btn btn-mini" id="tlToday">今天</button>
+          </div>
+        </div>
+        <div class="tl-wrap" id="tlWrap"></div>
       </div>
 
       <div class="grid-2">
         <div class="card">
           <div class="card-head">
             <h2>每日时长</h2>
-            <span class="card-hint">近 30 天 / 分钟</span>
+            <span class="card-hint">近 30 天 · 柱=分钟 线=页数</span>
           </div>
           <div class="chart" id="dailyChart"></div>
         </div>
         <div class="card">
           <div class="card-head">
             <h2>时段偏好</h2>
-            <span class="card-hint">累计 / 分钟</span>
+            <span class="card-hint" id="hourHint">累计 / 分钟</span>
           </div>
           <div class="chart" id="hourChart"></div>
         </div>

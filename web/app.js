@@ -3,15 +3,25 @@
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => Array.from(document.querySelectorAll(sel));
 
+const WEEK_NAMES = ["一", "二", "三", "四", "五", "六", "日"];
+const WEEK_FULL = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
+
 const state = {
   view: "stats",
   host: "",
   port: 2222,
   path: "/mnt/us/documents",
+  range: "all",
+  calMonth: null,          // {year, month}
+  selectedDate: null,      // 'YYYY-MM-DD'
   stats: null,
+  calendar: null,
+  day: null,
   status: null,
   online: null,
   charts: {},
+  colors: new Map(),       // book_id -> 调色板序号 1..8
+  colorSeq: 0,
   loaded: { stats: false, library: false, device: false },
 };
 
@@ -76,7 +86,38 @@ function fmtDate(ts, withTime = false) {
   return withTime ? `${base} ${pad(d.getHours())}:${pad(d.getMinutes())}` : base;
 }
 
-/* ---------- 主题色（图表跟随系统深浅色） ---------- */
+function fmtClock(seconds) {
+  const s = Math.max(0, Math.min(86400, Math.round(seconds)));
+  const h = Math.floor(s / 3600) % 24;
+  const m = Math.floor((s % 3600) / 60);
+  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+}
+
+function isoOf(date) {
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+function parseDate(iso) {
+  return new Date(`${iso}T00:00:00`);
+}
+
+function escapeHtml(text) {
+  return String(text).replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[c]));
+}
+
+/* 书的本色：同一本书在日历、时间轴、排行榜里颜色一致 */
+function bookColor(id) {
+  if (!state.colors.has(id)) {
+    state.colorSeq += 1;
+    state.colors.set(id, ((state.colorSeq - 1) % 8) + 1);
+  }
+  return `var(--book-${state.colors.get(id)})`;
+}
+
+/* ---------- 主题与图表 ---------- */
 
 function palette() {
   const css = getComputedStyle(document.documentElement);
@@ -88,9 +129,7 @@ function palette() {
     muted: read("--muted"),
     border: read("--border"),
     panel: read("--panel"),
-    ramp: dark
-      ? ["#1e332e", "#2b5f52", "#3d8f76", "#4fbfa0"]
-      : ["#eaf4f0", "#a9d8c8", "#5fb79c", "#1f7a63"],
+    soft: dark ? "#2a3f39" : "#a9d8c8",
   };
 }
 
@@ -176,8 +215,7 @@ async function pingDevice() {
 function setOnline(online, host) {
   state.online = online;
   if (host) state.host = host;
-  const dot = $("#deviceDot");
-  dot.className = "dot " + (online ? "online" : "offline");
+  $("#deviceDot").className = "dot " + (online ? "online" : "offline");
   $("#chipHost").textContent = host || "未配置";
   $("#chipSub").textContent = online ? "已连接" : "未连接";
   const banner = $("#offlineBanner");
@@ -189,17 +227,18 @@ function setOnline(online, host) {
   }
 }
 
-/* ---------- 阅读统计 ---------- */
+/* ---------- 阅读统计：概览 ---------- */
 
 async function loadStats(force = false) {
   $("#pageSub").textContent = "正在从设备读取统计库…";
   try {
-    const data = await api(`/api/stats${force ? "?refresh=1" : ""}`);
+    const data = await api(`/api/stats?range=${state.range}${force ? "&refresh=1" : ""}`);
     state.stats = data;
     state.loaded.stats = true;
     setOnline(true, data.host);
     paintStats();
     $("#pageSub").textContent = `数据更新于 ${new Date().toLocaleTimeString("zh-CN")}`;
+    await Promise.all([loadCalendar(), loadDay(state.selectedDate)]);
   } catch (err) {
     $("#pageSub").textContent = "读取失败";
     state.loaded.stats = true;
@@ -218,109 +257,28 @@ function paintStats() {
   const o = d.overview;
 
   $("#kpiTotal").textContent = fmtDuration(o.total_seconds);
-  $("#kpiTotalFoot").textContent = `共 ${o.page_records} 次翻页`;
+  $("#kpiTotalFoot").textContent = d.range_start
+    ? `${d.range_label} · 自 ${d.range_start}`
+    : `累计 ${fmtDuration(d.all_time_seconds)}`;
 
-  $("#kpiWeek").textContent = fmtDuration(o.this_week_seconds);
-  $("#kpiWeekFoot").textContent = `日均 ${o.avg_minutes} 分钟`;
+  $("#kpiPages").textContent = o.page_records.toLocaleString("zh-CN");
+  $("#kpiPagesFoot").textContent = `涉及 ${o.total_books} 本书`;
 
-  $("#kpiStreak").textContent = `${o.current_streak} 天`;
-  $("#kpiStreakFoot").textContent = `最长连续 ${o.longest_streak} 天`;
+  $("#kpiDays").textContent = `${o.active_days} 天`;
+  $("#kpiDaysFoot").textContent = `累计最长连续 ${o.longest_streak} 天`;
 
-  $("#kpiBooks").textContent = `${o.total_books} 本`;
-  $("#kpiBooksFoot").textContent = o.last_read ? `最近 ${fmtDate(o.last_read)}` : "尚无记录";
+  $("#kpiSpeed").textContent = o.speed ? `${o.speed}` : "—";
+  $("#kpiSpeedFoot").textContent = o.speed ? "页 / 小时" : "数据不足";
 
-  $("#calHint").textContent = `${o.active_days} 天有阅读记录`;
+  $("#hourHint").textContent = `${d.range_label}累计 / 分钟`;
   $("#booksHint").textContent = `${d.books.length} 本`;
-  paintCalendar(d.calendar);
+  $("#rangeHint").textContent = d.range_start
+    ? `${d.range_start} 至今 · 主数据源 statistics.sqlite3`
+    : `有记录以来 · 主数据源 statistics.sqlite3`;
+
   paintDaily(d.daily);
   paintHourly(d.hourly);
   paintBooks(d.books);
-}
-
-function isoOf(date) {
-  const pad = (n) => String(n).padStart(2, "0");
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
-}
-
-function paintCalendar(rows) {
-  const p = palette();
-  const map = new Map(rows.map((r) => [r[0], r[1]]));
-  const dayMs = 86400000;
-  const last = new Date(`${rows[rows.length - 1][0]}T00:00:00`);
-  const first = new Date(`${rows[0][0]}T00:00:00`);
-
-  // 列 = 周（周一起），行 = 星期，做成连续热力图而不是按月分块
-  const start = new Date(first);
-  start.setDate(start.getDate() - ((start.getDay() + 6) % 7));
-  const weeks = Math.ceil((Math.round((last - start) / dayMs) + 1) / 7);
-
-  const data = [];
-  const monthLabels = [];
-  let prevLabelAt = -99;
-  for (let w = 0; w < weeks; w += 1) {
-    const monday = new Date(start.getTime() + w * 7 * dayMs);
-    for (let day = 0; day < 7; day += 1) {
-      const d = new Date(start.getTime() + (w * 7 + day) * dayMs);
-      if (d > last || d < first) continue;
-      const iso = isoOf(d);
-      const v = map.get(iso) || 0;
-      data.push({ value: [w, day, v], date: iso });
-      // 只标季度首月，避免窄屏下月份标签互相压字
-      if (d.getDate() === 1 && (d.getMonth() + 1) % 3 === 1 && w - prevLabelAt > 2) {
-        monthLabels[w] = `${d.getMonth() + 1}月`;
-        prevLabelAt = w;
-      }
-    }
-  }
-  const max = Math.max(10, ...data.map((d) => d.value[2]));
-
-  chartOf("calChart", {
-    backgroundColor: "transparent",
-    grid: { left: 34, right: 10, top: 26, bottom: 18 },
-    tooltip: {
-      formatter: (params) => `${params.data.date}<br/>阅读 <b>${params.data.value[2]}</b> 分钟`,
-      backgroundColor: p.panel,
-      borderColor: p.border,
-      textStyle: { color: p.text, fontSize: 12 },
-    },
-    visualMap: {
-      show: false,
-      min: 0,
-      max,
-      inRange: { color: p.ramp },
-    },
-    xAxis: {
-      type: "category",
-      data: Array.from({ length: weeks }, (_, i) => i),
-      axisLine: { show: false },
-      axisTick: { show: false },
-      splitLine: { show: false },
-      axisLabel: {
-        color: p.muted,
-        fontSize: 11,
-        interval: 0,
-        formatter: (value) => monthLabels[value] || "",
-      },
-    },
-    yAxis: {
-      type: "category",
-      data: ["一", "", "三", "", "五", "", "日"],
-      inverse: true,
-      axisLine: { show: false },
-      axisTick: { show: false },
-      splitLine: { show: false },
-      axisLabel: { color: p.muted, fontSize: 11 },
-    },
-    series: [
-      {
-        type: "heatmap",
-        data,
-        itemStyle: { borderRadius: 2, borderWidth: 1, borderColor: p.panel },
-        emphasis: { itemStyle: { borderColor: p.text, borderWidth: 1 } },
-        progressive: 0,
-      },
-    ],
-  });
 }
 
 function paintDaily(rows) {
@@ -328,14 +286,16 @@ function paintDaily(rows) {
   const slice = rows.slice(-30);
   chartOf("dailyChart", {
     backgroundColor: "transparent",
-    grid: { left: 40, right: 12, top: 18, bottom: 28 },
+    grid: { left: 42, right: 44, top: 20, bottom: 28 },
     tooltip: {
       trigger: "axis",
-      formatter: (ps) => `${ps[0].axisValue}<br/>${ps[0].data} 分钟`,
+      formatter: (ps) =>
+        `${ps[0].axisValue}<br/>${ps[0].data} 分钟 · ${ps[1] ? ps[1].data : 0} 页`,
       backgroundColor: p.panel,
       borderColor: p.border,
       textStyle: { color: p.text, fontSize: 12 },
     },
+    legend: { show: false },
     xAxis: {
       type: "category",
       data: slice.map((r) => r[0].slice(5)),
@@ -343,17 +303,34 @@ function paintDaily(rows) {
       axisTick: { show: false },
       axisLabel: { color: p.muted, fontSize: 11, interval: 4 },
     },
-    yAxis: {
-      type: "value",
-      splitLine: { lineStyle: { color: p.border } },
-      axisLabel: { color: p.muted, fontSize: 11 },
-    },
+    yAxis: [
+      {
+        type: "value",
+        splitLine: { lineStyle: { color: p.border } },
+        axisLabel: { color: p.muted, fontSize: 11 },
+      },
+      {
+        type: "value",
+        splitLine: { show: false },
+        axisLabel: { color: p.muted, fontSize: 11 },
+      },
+    ],
     series: [
       {
+        name: "分钟",
         type: "bar",
         data: slice.map((r) => r[1]),
         barMaxWidth: 14,
         itemStyle: { color: p.accent, borderRadius: [3, 3, 0, 0] },
+      },
+      {
+        name: "页数",
+        type: "line",
+        yAxisIndex: 1,
+        data: slice.map((r) => r[2]),
+        symbol: "none",
+        smooth: true,
+        lineStyle: { color: p.soft, width: 1.5 },
       },
     ],
   });
@@ -364,7 +341,7 @@ function paintHourly(values) {
   const peak = Math.max(...values);
   chartOf("hourChart", {
     backgroundColor: "transparent",
-    grid: { left: 40, right: 12, top: 18, bottom: 28 },
+    grid: { left: 42, right: 12, top: 20, bottom: 28 },
     tooltip: {
       trigger: "axis",
       formatter: (ps) => `${ps[0].axisValue} 点<br/>${ps[0].data} 分钟`,
@@ -390,7 +367,10 @@ function paintHourly(values) {
         barMaxWidth: 12,
         data: values.map((v) => ({
           value: v,
-          itemStyle: { color: v === peak ? p.accent : p.ramp[1], borderRadius: [3, 3, 0, 0] },
+          itemStyle: {
+            color: v === peak && v > 0 ? p.accent : p.soft,
+            borderRadius: [3, 3, 0, 0],
+          },
         })),
       },
     ],
@@ -401,14 +381,14 @@ function paintBooks(books) {
   const body = $("#booksTable").querySelector("tbody");
   body.innerHTML = "";
   if (!books.length) {
-    body.innerHTML = '<tr><td colspan="5" class="empty">还没有阅读记录</td></tr>';
+    body.innerHTML = '<tr><td colspan="5" class="empty">当前范围没有阅读记录</td></tr>';
     return;
   }
   books.forEach((b, i) => {
     const tr = document.createElement("tr");
-    const pct = b.progress == null ? null : b.progress;
+    const pct = b.progress;
     tr.innerHTML = `
-      <td class="col-rank">${i + 1}</td>
+      <td class="col-rank"><i class="swatch" style="background:${bookColor(b.id)}"></i>${i + 1}</td>
       <td><div class="book-title"><b>${escapeHtml(b.title)}</b>${
         b.authors ? `<span>${escapeHtml(b.authors)}</span>` : ""
       }</div></td>
@@ -423,10 +403,235 @@ function paintBooks(books) {
   });
 }
 
-function escapeHtml(text) {
-  return String(text).replace(/[&<>"']/g, (c) => ({
-    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
-  }[c]));
+/* ---------- 日历视图（手写，不用日历库） ---------- */
+
+async function loadCalendar(year, month) {
+  if (!year) {
+    const now = new Date();
+    if (!state.calMonth) state.calMonth = { year: now.getFullYear(), month: now.getMonth() + 1 };
+    year = state.calMonth.year;
+    month = state.calMonth.month;
+  }
+  try {
+    const data = await api(`/api/stats/calendar?month=${year}-${String(month).padStart(2, "0")}`);
+    state.calendar = data;
+    paintCalendar(data);
+  } catch (err) {
+    toast(err.message, "err");
+  }
+}
+
+function paintCalendar(cal) {
+  $("#calTitle").textContent = `${cal.year} 年 ${cal.month} 月`;
+  const totalMin = Math.round(cal.total_seconds / 60);
+  const active = cal.days.filter((d) => d.seconds > 0).length;
+  $("#calSummary").textContent = totalMin
+    ? `本月 ${active} 天有阅读，共 ${fmtDuration(cal.total_seconds)}`
+    : "本月还没有阅读记录";
+
+  // 星期表头
+  const head = $("#calWeekHead");
+  head.innerHTML = "";
+  WEEK_NAMES.forEach((n) => {
+    const el = document.createElement("span");
+    el.textContent = n;
+    head.appendChild(el);
+  });
+
+  // 日格
+  const grid = $("#calGrid");
+  grid.innerHTML = "";
+  const offset = cal.first_weekday - cal.week_start;
+  const blanks = (offset + 7) % 7;
+  for (let i = 0; i < blanks; i += 1) {
+    const b = document.createElement("div");
+    b.className = "cal-blank";
+    grid.appendChild(b);
+  }
+
+  const todayIso = cal.today;
+  cal.days.forEach((d) => {
+    const cell = document.createElement("button");
+    cell.type = "button";
+    cell.className = "cal-day";
+    cell.dataset.date = d.date;
+    if (d.seconds > 0) cell.classList.add("has-data");
+    if (d.date === todayIso) cell.classList.add("is-today");
+    if (d.date === state.selectedDate) cell.classList.add("is-sel");
+
+    // 底色深浅按当天总时长（很淡，真正的信息在直方图和色条上）
+    if (d.seconds > 0 && cal.max_day_seconds > 0) {
+      const ratio = Math.pow(d.seconds / cal.max_day_seconds, 0.6);
+      cell.style.setProperty("--tint", (0.05 + ratio * 0.16).toFixed(3));
+    }
+
+    const num = document.createElement("span");
+    num.className = "cal-num";
+    num.textContent = d.day;
+    cell.appendChild(num);
+
+    if (d.hidden > 0) {
+      const more = document.createElement("span");
+      more.className = "cal-more";
+      more.textContent = `+${d.hidden}`;
+      cell.appendChild(more);
+    }
+
+    const histo = document.createElement("div");
+    histo.className = "cal-histo";
+    d.hours.forEach((minutes) => {
+      const bar = document.createElement("i");
+      // 与 KOReader 的 HistogramWidget 一致：ratio = 该小时时长/1 小时，
+      // 满一小时顶到最高，非零至少 1px，不做跨日归一化
+      const h = minutes > 0
+        ? Math.max(1, Math.round(Math.min(1, minutes / 60) * 20))
+        : 0;
+      bar.style.height = `${h}px`;
+      if (h > 0) bar.classList.add("on");      histo.appendChild(bar);
+    });
+    cell.appendChild(histo);
+
+    cell.onclick = () => selectDate(d.date);
+    grid.appendChild(cell);
+  });
+
+  paintSpans(cal);
+  paintLegend(cal);
+}
+
+function paintSpans(cal) {
+  const layer = $("#calSpans");
+  layer.innerHTML = "";
+  const offset = cal.first_weekday - cal.week_start;
+  const blanks = (offset + 7) % 7;
+
+  cal.spans.forEach((s) => {
+    const el = document.createElement("div");
+    el.className = "cal-span";
+    const col = s.week_col + 1;
+    const row = s.week + 1;
+    el.style.gridColumn = `${col} / span ${s.days}`;
+    el.style.gridRow = `${row}`;
+    el.style.marginTop = `calc(21px + ${s.lane} * 14px)`;
+    el.style.background = bookColor(s.id);
+    el.title = `${s.title} · ${s.days} 天`;
+    const label = document.createElement("span");
+    label.textContent = s.title;
+    el.appendChild(label);
+    layer.appendChild(el);
+  });
+}
+
+function paintLegend(cal) {
+  const map = new Map();
+  cal.spans.forEach((s) => {
+    if (!map.has(s.id)) map.set(s.id, s.title);
+  });
+  const box = $("#calLegend");
+  box.innerHTML = "";
+  Array.from(map.entries()).slice(0, 8).forEach(([id, title]) => {
+    const item = document.createElement("span");
+    item.className = "legend-item";
+    item.innerHTML = `<i style="background:${bookColor(id)}"></i><span title="${escapeHtml(title)}">${escapeHtml(title)}</span>`;
+    box.appendChild(item);
+  });
+}
+
+async function selectDate(date) {
+  state.selectedDate = date;
+  $$(".cal-day").forEach((c) => c.classList.toggle("is-sel", c.dataset.date === date));
+  await loadDay(date);
+}
+
+/* ---------- 时间轴（手写） ---------- */
+
+async function loadDay(date) {
+  if (!date) date = state.selectedDate || isoOf(new Date());
+  state.selectedDate = date;
+  try {
+    const data = await api(`/api/stats/day?date=${date}`);
+    state.day = data;
+    paintTimeline(data);
+  } catch (err) {
+    toast(err.message, "err");
+  }
+}
+
+function paintTimeline(day) {
+  const dt = parseDate(day.date);
+  $("#tlDate").textContent =
+    `${day.date} ${WEEK_FULL[day.weekday - 1]}`;
+  $("#tlSummary").textContent = day.seconds
+    ? `${fmtDuration(day.seconds)} · ${day.page_records} 次翻页 · ${day.books.length} 本书`
+    : "没有阅读记录";
+
+  const wrap = $("#tlWrap");
+  wrap.innerHTML = "";
+
+  const head = document.createElement("div");
+  head.className = "tl-head";
+  head.innerHTML = '<span class="tl-head-label"></span><div class="tl-axis"></div>';
+  const axis = head.querySelector(".tl-axis");
+  for (let h = 0; h <= 24; h += 3) {
+    const t = document.createElement("span");
+    t.textContent = String(h).padStart(2, "0");
+    t.style.left = `${(h / 24) * 100}%`;
+    axis.appendChild(t);
+  }
+  wrap.appendChild(head);
+
+  if (!day.books.length) {
+    const empty = document.createElement("div");
+    empty.className = "tl-empty";
+    empty.textContent = "这一天没有阅读记录";
+    wrap.appendChild(empty);
+    return;
+  }
+
+  const isToday = day.date === isoOf(new Date());
+  const nowSec = isToday
+    ? (new Date().getHours() * 3600 + new Date().getMinutes() * 60 + new Date().getSeconds())
+    : null;
+
+  day.books.forEach((b) => {
+    const row = document.createElement("div");
+    row.className = "tl-row";
+
+    const label = document.createElement("div");
+    label.className = "tl-label";
+    label.innerHTML = `<i class="swatch" style="background:${bookColor(b.id)}"></i><span title="${escapeHtml(b.title)}">${escapeHtml(b.title)}</span><em>${Math.round((b.raw_seconds || b.seconds) / 60)} 分</em>`;
+    row.appendChild(label);
+
+    const track = document.createElement("div");
+    track.className = "tl-track";
+    b.periods.forEach((p) => {
+      const block = document.createElement("i");
+      block.className = "tl-block";
+      block.style.background = bookColor(b.id);
+      block.style.left = `${(p.start / 86400) * 100}%`;
+      block.style.width = `${Math.max(0.14, ((p.finish - p.start) / 86400) * 100)}%`;
+      block.title = `${fmtClock(p.start)} – ${fmtClock(p.finish)} · ${Math.max(1, Math.round((p.finish - p.start) / 60))} 分钟`;
+      track.appendChild(block);
+    });
+    if (nowSec != null) {
+      const mark = document.createElement("span");
+      mark.className = "tl-now";
+      mark.style.left = `${(nowSec / 86400) * 100}%`;
+      track.appendChild(mark);
+    }
+    row.appendChild(track);
+    wrap.appendChild(row);
+  });
+
+  const foot = document.createElement("div");
+  foot.className = "tl-foot";
+  const first = day.books.reduce(
+    (min, b) => Math.min(min, b.periods[0] ? b.periods[0].start : Infinity), Infinity);
+  const last = day.books.reduce(
+    (max, b) => Math.max(max, b.periods.length ? b.periods[b.periods.length - 1].finish : 0), 0);
+  foot.innerHTML = `<span>从 <b>${fmtClock(first)}</b> 读到 <b>${fmtClock(last)}</b></span>
+    <span>30 秒内的间隙算作连续阅读</span>`;
+  wrap.appendChild(foot);
 }
 
 /* ---------- 书库 ---------- */
@@ -524,8 +729,7 @@ function paintFiles(entries) {
     const opsTd = document.createElement("td");
     opsTd.className = "col-ops";
     if (e.is_dir) {
-      const open = button("打开", "btn btn-mini", () => loadFiles(`${state.path}/${e.name}`));
-      opsTd.appendChild(open);
+      opsTd.appendChild(button("打开", "btn btn-mini", () => loadFiles(`${state.path}/${e.name}`)));
     } else {
       opsTd.appendChild(button("下载", "btn btn-mini", () => downloadFile(`${state.path}/${e.name}`)));
     }
@@ -783,6 +987,30 @@ function bindEvents() {
   $("#btnSaveHost").onclick = saveHost;
   $("#btnScan").onclick = scanDevices;
 
+  $("#rangeSeg").onclick = (e) => {
+    const btn = e.target.closest("button");
+    if (!btn) return;
+    state.range = btn.dataset.range;
+    $$("#rangeSeg button").forEach((b) => b.classList.toggle("is-on", b === btn));
+    loadStats();
+  };
+
+  $("#calPrev").onclick = () => shiftMonth(-1);
+  $("#calNext").onclick = () => shiftMonth(1);
+  $("#calToday").onclick = () => {
+    const now = new Date();
+    state.calMonth = { year: now.getFullYear(), month: now.getMonth() + 1 };
+    loadCalendar();
+  };
+  $("#tlPrev").onclick = () => shiftDay(-1);
+  $("#tlNext").onclick = () => shiftDay(1);
+  $("#tlToday").onclick = () => {
+    const today = isoOf(new Date());
+    state.calMonth = { year: new Date().getFullYear(), month: new Date().getMonth() + 1 };
+    loadCalendar();
+    selectDate(today);
+  };
+
   const mask = $("#dropMask");
   let depth = 0;
   window.addEventListener("dragenter", (e) => {
@@ -806,10 +1034,41 @@ function bindEvents() {
   });
 }
 
+function shiftMonth(delta) {
+  const cur = state.calMonth || { year: new Date().getFullYear(), month: new Date().getMonth() + 1 };
+  let { year, month } = cur;
+  month += delta;
+  if (month < 1) {
+    month = 12;
+    year -= 1;
+  } else if (month > 12) {
+    month = 1;
+    year += 1;
+  }
+  state.calMonth = { year, month };
+  loadCalendar(year, month);
+}
+
+function shiftDay(delta) {
+  const base = state.selectedDate ? parseDate(state.selectedDate) : new Date();
+  base.setDate(base.getDate() + delta);
+  const iso = isoOf(base);
+  // 跨月时同步日历
+  if (!state.calMonth || base.getMonth() + 1 !== state.calMonth.month || base.getFullYear() !== state.calMonth.year) {
+    state.calMonth = { year: base.getFullYear(), month: base.getMonth() + 1 };
+    loadCalendar(state.calMonth.year, state.calMonth.month);
+  }
+  selectDate(iso);
+}
+
 /* ---------- 启动 ---------- */
 
 async function boot() {
   bindEvents();
+  state.selectedDate = isoOf(new Date());
+  const now = new Date();
+  state.calMonth = { year: now.getFullYear(), month: now.getMonth() + 1 };
+
   try {
     const cfg = await api("/api/config");
     state.host = cfg.host;
@@ -821,14 +1080,10 @@ async function boot() {
   } catch (err) {
     toast("读取本地配置失败", "err");
   }
-  pillStatusStarting();
-  await pingDevice();
-  switchView("stats");
-}
-
-function pillStatusStarting() {
   $("#deviceDot").className = "dot";
   $("#chipSub").textContent = "检测中…";
+  await pingDevice();
+  switchView("stats");
 }
 
 boot();

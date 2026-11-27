@@ -1,6 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""阅读统计：把 KOReader 的 statistics.sqlite3 读成前端直接能画的形状。
+"""阅读统计：把 KOReader 的 statistics.sqlite3 读成前端可直接画的结构。
+
+聚合口径刻意对齐 KOReader 的 statistics.koplugin（源码已核对）：
+  * 日历每格的小时直方图 —— getReadingRatioPerHourByDay()
+  * 跨天书签合并 —— calendarview.lua CalendarWeek:addDay() 的 span_days 算法
+  * 每天最多 N 个书位、超出显示 +N —— calendar_nb_book_spans（默认 3）
+  * 单日时间轴 —— getReadingDurationBySecond()，30 秒内的间隙视为连续阅读
+  * 页码缩放 —— page_stat 是视图，按当前 book.pages 重排 page_stat_data
 
 库结构（DB_SCHEMA_VERSION 20221111）：
     book(id, title, authors, notes, last_open, highlights, pages, series,
@@ -13,6 +20,20 @@ import sqlite3
 import time
 
 from . import config
+
+# KOReader 默认值
+DEFAULT_MIN_READ_SEC = 5
+DEFAULT_MAX_READ_SEC = 120
+LANES = 3                  # calendar_nb_book_spans
+WEEK_START = 1             # 1 = 周一（对应 calendar_start_day_of_week = 2）
+
+RANGE_LABELS = {
+    "today": "今天",
+    "week": "本周",
+    "month": "本月",
+    "year": "今年",
+    "all": "全部",
+}
 
 
 class StatsCache:
@@ -28,130 +49,404 @@ class StatsCache:
         self.fetched_at = time.time()
         return self.db_path
 
-    def payload(self):
+    def _connect(self):
+        return sqlite3.connect("file:{}?mode=ro".format(self.db_path.as_posix()), uri=True)
+
+    def snapshot(self, range_key="all"):
         if not self.db_path.exists():
-            return empty_payload()
+            return empty_snapshot(range_key)
         try:
-            con = sqlite3.connect("file:{}?mode=ro".format(self.db_path.as_posix()), uri=True)
+            con = self._connect()
+            try:
+                data = build_snapshot(con, range_key)
+            finally:
+                con.close()
         except sqlite3.Error:
-            return empty_payload()
-        try:
-            data = build(con)
-        except sqlite3.Error:
-            return empty_payload()
-        finally:
-            con.close()
+            return empty_snapshot(range_key)
         data["fetched_at"] = int(self.fetched_at)
         data["age_sec"] = int(time.time() - self.fetched_at)
         return data
 
+    def calendar(self, year, month):
+        if not self.db_path.exists():
+            return empty_calendar(year, month)
+        con = self._connect()
+        try:
+            return build_calendar(con, year, month)
+        finally:
+            con.close()
 
-def empty_payload():
-    return {
-        "overview": {
-            "total_seconds": 0, "total_books": 0, "page_records": 0,
-            "active_days": 0, "current_streak": 0, "longest_streak": 0,
-            "avg_minutes": 0, "last_read": None, "this_week_seconds": 0,
-        },
-        "daily": [], "hourly": [0] * 24, "weekday": [0] * 7,
-        "calendar": [], "books": [],
-        "fetched_at": 0, "age_sec": 0,
-    }
+    def day(self, date):
+        if not self.db_path.exists():
+            return empty_day(date)
+        con = self._connect()
+        try:
+            return build_day(con, date)
+        finally:
+            con.close()
 
 
-def build(con):
-    cur = con.cursor()
-    rows = cur.execute(
-        "SELECT start_time, duration FROM page_stat_data WHERE duration > 0"
+# ---------- 通用 ----------
+
+def _cutoff(range_key, now=None):
+    now = now or dt.datetime.now()
+    today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    if range_key == "today":
+        return today
+    if range_key == "week":
+        return today - dt.timedelta(days=today.weekday())
+    if range_key == "month":
+        return today.replace(day=1)
+    if range_key == "year":
+        return today.replace(month=1, day=1)
+    return None
+
+
+def _page_rows(con):
+    return con.execute(
+        "SELECT id_book, page, start_time, duration FROM page_stat_data "
+        "WHERE duration > 0 AND start_time > 0 ORDER BY start_time"
     ).fetchall()
 
-    daily, hourly, weekday = {}, [0] * 24, [0] * 7
+
+def _books_meta(con):
+    meta = {}
+    for bid, title, authors, pages, last_open, total_read_time in con.execute(
+            "SELECT id, title, authors, pages, last_open, total_read_time FROM book"):
+        meta[bid] = {
+            "title": (title or "未命名").strip() or "未命名",
+            "authors": (authors or "").strip(),
+            "pages": pages or None,
+            "last_open": last_open or 0,
+            "total_read_time": total_read_time or 0,
+        }
+    return meta
+
+
+# ---------- 概览（按时间范围） ----------
+
+def build_snapshot(con, range_key="all"):
+    rows = _page_rows(con)
+    meta = _books_meta(con)
+    cutoff = _cutoff(range_key)
+    cutoff_ts = cutoff.timestamp() if cutoff else None
+
+    scoped = [r for r in rows if cutoff_ts is None or r[2] >= cutoff_ts]
+
+    # 连续阅读天数要看全量数据，不能被范围影响
+    all_days = {}
+    for _, _, ts, duration in rows:
+        d = dt.datetime.fromtimestamp(ts).date()
+        all_days[d] = all_days.get(d, 0) + duration
+
+    daily, daily_pages, hourly, weekday = {}, {}, [0] * 24, [0] * 7
+    book_acc = {}
     total = 0
-    for start, duration in rows:
-        if not start or not duration or duration < 0:
-            continue
-        ts = dt.datetime.fromtimestamp(start)
-        d = ts.date()
+    for bid, page, ts, duration in scoped:
+        moment = dt.datetime.fromtimestamp(ts)
+        d = moment.date()
         daily[d] = daily.get(d, 0) + duration
-        hourly[ts.hour] += duration
-        weekday[ts.weekday()] += duration
+        daily_pages[d] = daily_pages.get(d, 0) + 1
+        hourly[moment.hour] += duration
+        weekday[moment.weekday()] += duration
         total += duration
+        acc = book_acc.setdefault(bid, {"seconds": 0, "pages": set(), "last": 0})
+        acc["seconds"] += duration
+        acc["pages"].add(page)
+        acc["last"] = max(acc["last"], ts)
 
     today = dt.date.today()
-    calendar = []
-    for i in range(370, -1, -1):
+    # 图表用的连续日序列，最多回看 366 天：[日期, 分钟, 翻页数]
+    series = []
+    for i in range(366 - 1, -1, -1):
         d = today - dt.timedelta(days=i)
-        calendar.append([d.isoformat(), round(daily.get(d, 0) / 60, 1)])
-
-    daily_series = []
-    for i in range(89, -1, -1):
-        d = today - dt.timedelta(days=i)
-        daily_series.append([d.isoformat(), round(daily.get(d, 0) / 60, 1)])
+        if cutoff and d < cutoff.date():
+            continue
+        series.append([d.isoformat(), round(daily.get(d, 0) / 60, 1), daily_pages.get(d, 0)])
 
     active_days = len(daily)
-    longest, run = 0, 0
-    prev = None
-    for d in sorted(daily):
-        if prev and (d - prev).days == 1:
-            run += 1
-        else:
-            run = 1
+    longest, run, prev = 0, 0, None
+    for d in sorted(all_days):
+        run = run + 1 if prev and (d - prev).days == 1 else 1
         longest = max(longest, run)
         prev = d
 
     streak = 0
-    cursor = today if today in daily else today - dt.timedelta(days=1)
-    while cursor in daily:
+    cursor = today if today in all_days else today - dt.timedelta(days=1)
+    while cursor in all_days:
         streak += 1
         cursor -= dt.timedelta(days=1)
 
-    week_start = today - dt.timedelta(days=today.weekday())
-    this_week = sum(v for d, v in daily.items() if d >= week_start)
-
     books = []
-    q = """
-        SELECT b.id, b.title, b.authors, b.pages, b.last_open, b.total_read_time,
-               SUM(p.duration) AS secs,
-               COUNT(DISTINCT p.page) AS pages_read,
-               MAX(p.start_time) AS last_ts
-        FROM book b
-        JOIN page_stat_data p ON p.id_book = b.id
-        GROUP BY b.id
-        ORDER BY secs DESC
-    """
-    for bid, title, authors, pages, last_open, trt, secs, pages_read, last_ts in cur.execute(q):
+    for bid, acc in book_acc.items():
+        m = meta.get(bid, {})
+        total_pages = m.get("pages")
         progress = None
-        if pages and pages > 0:
-            progress = min(100.0, round(pages_read * 100.0 / pages, 1))
+        if total_pages:
+            progress = min(100.0, round(len(acc["pages"]) * 100.0 / total_pages, 1))
         books.append({
             "id": bid,
-            "title": (title or "未命名").strip(),
-            "authors": (authors or "").strip(),
-            "seconds": int(secs or 0),
-            "minutes": round((secs or 0) / 60, 1),
-            "pages_read": pages_read,
-            "pages_total": pages or None,
+            "title": m.get("title", "未命名"),
+            "authors": m.get("authors", ""),
+            "seconds": int(acc["seconds"]),
+            "pages_read": len(acc["pages"]),
+            "pages_total": total_pages,
             "progress": progress,
-            "last_read": int(last_ts or last_open or 0),
+            "last_read": int(acc["last"]),
         })
+    books.sort(key=lambda b: b["seconds"], reverse=True)
 
-    last_read = max((b["last_read"] for b in books), default=0)
+    speed = round(len(scoped) / (total / 3600), 1) if total else 0
 
     return {
+        "range": range_key,
+        "range_label": RANGE_LABELS.get(range_key, range_key),
+        "range_start": cutoff.date().isoformat() if cutoff else None,
         "overview": {
             "total_seconds": int(total),
             "total_books": len(books),
-            "page_records": len(rows),
+            "page_records": len(scoped),
             "active_days": active_days,
             "current_streak": streak,
             "longest_streak": longest,
             "avg_minutes": round(total / 60 / active_days, 1) if active_days else 0,
-            "last_read": last_read or None,
-            "this_week_seconds": int(this_week),
+            "speed": speed,
+            "last_read": max((b["last_read"] for b in books), default=0) or None,
         },
-        "daily": daily_series,
+        "daily": series,
         "hourly": [round(v / 60, 1) for v in hourly],
         "weekday": [round(v / 60, 1) for v in weekday],
-        "calendar": calendar,
         "books": books[:40],
+        "all_time_seconds": int(sum(all_days.values())),
+    }
+
+
+# ---------- 日历视图 ----------
+
+def build_calendar(con, year, month):
+    """月历数据：每天 24 小时直方图 + 跨天书签 + 书位分配。"""
+    first = dt.date(year, month, 1)
+    last = (dt.date(year, month + 1, 1) - dt.timedelta(days=1)) if month < 12 \
+        else dt.date(year, 12, 31)
+    start_ts = int(dt.datetime.combine(first, dt.time.min).timestamp())
+    end_ts = int(dt.datetime.combine(last, dt.time.max).timestamp())
+
+    rows = con.execute(
+        "SELECT id_book, page, start_time, duration FROM page_stat_data "
+        "WHERE duration > 0 AND start_time BETWEEN ? AND ? ORDER BY start_time",
+        (start_ts, end_ts)).fetchall()
+    meta = _books_meta(con)
+
+    days = {}
+    for bid, page, ts, duration in rows:
+        moment = dt.datetime.fromtimestamp(ts)
+        d = moment.date()
+        cell = days.setdefault(d, {"seconds": 0, "hours": [0] * 24, "books": {}})
+        cell["seconds"] += duration
+        cell["hours"][moment.hour] += duration
+        b = cell["books"].setdefault(bid, {"seconds": 0, "pages": set()})
+        b["seconds"] += duration
+        b["pages"].add(page)
+
+    index_days = []
+    cursor = first
+    while cursor <= last:
+        index_days.append(cursor)
+        cursor += dt.timedelta(days=1)
+
+    # ---- 书位分配与跨天合并（移植 CalendarWeek:addDay）----
+    weeks = []       # 每周一个数组，元素为 7 天的 {date, slots}
+    lane_days = []   # 与 index_days 对齐的 slots
+    week_of_day = {}
+
+    week_cursor = None
+    for i, d in enumerate(index_days):
+        if week_cursor is None or d.weekday() == WEEK_START - 1:
+            week_cursor = []
+            weeks.append(week_cursor)
+        week_of_day[i] = len(weeks) - 1
+
+        cell = days.get(d)
+        slots = [None] * LANES
+        if cell:
+            ordered = sorted(cell["books"].items(), key=lambda kv: kv[1]["seconds"], reverse=True)
+            for lane, (bid, acc) in enumerate(ordered[:LANES]):
+                slots[lane] = {
+                    "id": bid,
+                    "title": meta.get(bid, {}).get("title", "未命名"),
+                    "seconds": int(acc["seconds"]),
+                    "start_day": i,
+                    "span_days": 1,
+                }
+        week_cursor.append({"date": d, "slots": slots})
+        lane_days.append(slots)
+
+    # 同周内向前合并：同一本书连续两天落在同一书位，就连成一条
+    pos = {d.isoformat(): i for i, d in enumerate(index_days)}
+    for week in weeks:
+        for d_idx in range(1, len(week)):
+            slots = week[d_idx]["slots"]
+            prev_slots = week[d_idx - 1]["slots"]
+            gi = pos[week[d_idx]["date"].isoformat()]
+            for pn in range(LANES):
+                prev_book = prev_slots[pn]
+                if not prev_book:
+                    continue
+                for tn in range(LANES):
+                    this_book = slots[tn]
+                    if this_book and this_book["id"] == prev_book["id"]:
+                        this_book["start_day"] = prev_book["start_day"]
+                        this_book["span_days"] = prev_book["span_days"] + 1
+                        for bk in range(prev_book["span_days"]):
+                            back = lane_days[gi - bk - 1]
+                            if back[pn]:
+                                back[pn]["span_days"] = this_book["span_days"]
+                        if tn != pn:
+                            slots[tn], slots[pn] = slots[pn], slots[tn]
+                        break
+
+    # 只在 span 起始日输出线
+    spans = []
+    for i, slots in enumerate(lane_days):
+        for lane, b in enumerate(slots):
+            if b and b["start_day"] == i:
+                spans.append({
+                    "id": b["id"],
+                    "title": b["title"],
+                    "start_day": i,
+                    "days": b["span_days"],
+                    "lane": lane,
+                    "week": week_of_day[i],
+                    "week_col": index_days[i].weekday() - (WEEK_START - 1),
+                })
+
+    payload_days = []
+    max_hour = 1
+    max_day = 1
+    for i, d in enumerate(index_days):
+        cell = days.get(d)
+        hours = cell["hours"] if cell else [0] * 24
+        max_hour = max(max_hour, max(hours))
+        seconds = cell["seconds"] if cell else 0
+        max_day = max(max_day, seconds)
+        n_books = len(cell["books"]) if cell else 0
+        payload_days.append({
+            "date": d.isoformat(),
+            "day": d.day,
+            "weekday": d.isoweekday(),
+            "seconds": int(seconds),
+            "minutes": round(seconds / 60, 1),
+            "hours": [round(h / 60, 1) for h in hours],
+            "books": n_books,
+            "hidden": max(0, n_books - LANES),
+            "week": week_of_day[i],
+        })
+
+    return {
+        "year": year,
+        "month": month,
+        "week_start": WEEK_START,
+        "first_weekday": first.isoweekday(),
+        "days_in_month": len(index_days),
+        "weeks": len(weeks),
+        "days": payload_days,
+        "spans": spans,
+        "max_day_seconds": int(max_day),
+        "max_hour_seconds": int(max_hour),
+        "total_seconds": int(sum(d["seconds"] for d in payload_days)),
+    }
+
+
+# ---------- 单日详情与时间轴 ----------
+
+def build_day(con, date):
+    """移植 getReadingDurationBySecond：30 秒内间隙合并，处理跨午夜接续。"""
+    ts = int(dt.datetime.combine(date, dt.time.min).timestamp())
+    ignorable_gap = max(30, DEFAULT_MIN_READ_SEC)
+
+    rows = con.execute(
+        "SELECT start_time, duration, id_book FROM page_stat_data "
+        "WHERE duration > 0 AND start_time BETWEEN ? AND ? ORDER BY start_time",
+        (ts - DEFAULT_MAX_READ_SEC - ignorable_gap,
+         ts + 86399 + ignorable_gap)).fetchall()
+    meta = _books_meta(con)
+
+    per_book = {}
+    order = []
+    last_book_id = None
+    last_finish = None
+    for start_ts, duration, bid in rows:
+        start = start_ts - ts
+        finish = start + duration
+        if finish < 0 or start > 86400:
+            continue
+        start = max(0, start)
+        finish = min(86400, finish)
+        if bid not in per_book:
+            per_book[bid] = {"id": bid, "title": meta.get(bid, {}).get("title", "未命名"),
+                             "periods": [], "seconds": 0, "raw_seconds": 0}
+            order.append(bid)
+        per_book[bid]["raw_seconds"] += duration
+        periods = per_book[bid]["periods"]
+        if (bid == last_book_id and last_finish is not None
+                and start - last_finish <= ignorable_gap and periods):
+            periods[-1]["finish"] = finish
+        else:
+            periods.append({"start": start, "finish": finish})
+        last_book_id = bid
+        last_finish = finish
+
+    books = []
+    for bid in order:
+        entry = per_book[bid]
+        entry["seconds"] = sum(p["finish"] - p["start"] for p in entry["periods"])
+        entry["periods"].sort(key=lambda p: p["start"])
+        books.append(entry)
+    books.sort(key=lambda b: b["periods"][0]["start"] if b["periods"] else 0)
+
+    total = con.execute(
+        "SELECT COUNT(*), COALESCE(SUM(duration),0) FROM page_stat_data "
+        "WHERE duration > 0 AND start_time BETWEEN ? AND ?", (ts, ts + 86399)).fetchone()
+
+    return {
+        "date": date.isoformat(),
+        "weekday": date.isoweekday(),
+        "seconds": int(total[1]),
+        "page_records": int(total[0]),
+        "books": books,
+        "day_start_ts": ts,
+    }
+
+
+# ---------- 空数据 ----------
+
+def empty_snapshot(range_key="all"):
+    return {
+        "range": range_key,
+        "range_label": RANGE_LABELS.get(range_key, range_key),
+        "range_start": None,
+        "overview": {
+            "total_seconds": 0, "total_books": 0, "page_records": 0,
+            "active_days": 0, "current_streak": 0, "longest_streak": 0,
+            "avg_minutes": 0, "speed": 0, "last_read": None,
+        },
+        "daily": [], "hourly": [0] * 24, "weekday": [0] * 7,
+        "books": [], "all_time_seconds": 0,
+        "fetched_at": 0, "age_sec": 0,
+    }
+
+
+def empty_calendar(year, month):
+    return {
+        "year": year, "month": month, "week_start": WEEK_START,
+        "first_weekday": dt.date(year, month, 1).isoweekday(),
+        "days_in_month": 0, "weeks": 0, "days": [], "spans": [],
+        "max_day_seconds": 1, "max_hour_seconds": 1, "total_seconds": 0,
+    }
+
+
+def empty_day(date):
+    return {
+        "date": date.isoformat(), "weekday": date.isoweekday(),
+        "seconds": 0, "page_records": 0, "books": [], "day_start_ts": 0,
     }

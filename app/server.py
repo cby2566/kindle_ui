@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """HTTP 接口层。所有阻塞的 SSH/SFTP 操作都写成同步 def，
 由 FastAPI 自动丢进线程池，不会堵住事件循环。"""
+import datetime as dt
 import mimetypes
 import os
 import tempfile
@@ -70,12 +71,42 @@ def discover(payload: dict = Body(default={})):
 # ---------- 阅读统计 ----------
 
 @app.get("/api/stats")
-def get_stats(refresh: int = 0):
+def get_stats(range: str = "all", refresh: int = 0):
     k = dev.Kindle()
     CACHE.ensure(k, force=bool(refresh))
-    data = CACHE.payload()
+    if range not in stats.RANGE_LABELS:
+        raise HTTPException(400, "不支持的时间范围：{}".format(range))
+    data = CACHE.snapshot(range)
     data["host"] = k.host
     return data
+
+
+@app.get("/api/stats/calendar")
+def get_calendar(month: str = ""):
+    today = dt.date.today()
+    if month:
+        try:
+            year, mon = (int(x) for x in month.split("-", 1))
+            dt.date(year, mon, 1)
+        except (ValueError, TypeError):
+            raise HTTPException(400, "月份格式应为 YYYY-MM")
+    else:
+        year, mon = today.year, today.month
+    data = CACHE.calendar(year, mon)
+    data["today"] = today.isoformat()
+    return data
+
+
+@app.get("/api/stats/day")
+def get_day(date: str = ""):
+    if date:
+        try:
+            target = dt.date.fromisoformat(date)
+        except ValueError:
+            raise HTTPException(400, "日期格式应为 YYYY-MM-DD")
+    else:
+        target = dt.date.today()
+    return CACHE.day(target)
 
 
 # ---------- 书库 ----------
