@@ -22,6 +22,7 @@ const state = {
   cacheOffline: false,
   cachedAt: null,
   charts: {},
+  timeline: null,          // vis.Timeline 实例
   colors: new Map(),       // book_id -> 调色板序号 1..8
   colorSeq: 0,
   loaded: { stats: false, library: false, device: false },
@@ -118,12 +119,16 @@ function escapeHtml(text) {
 }
 
 /* 书的本色：同一本书在日历、时间轴、排行榜里颜色一致 */
-function bookColor(id) {
+function bookColorIndex(id) {
   if (!state.colors.has(id)) {
     state.colorSeq += 1;
     state.colors.set(id, ((state.colorSeq - 1) % 8) + 1);
   }
-  return `var(--book-${state.colors.get(id)})`;
+  return state.colors.get(id);
+}
+
+function bookColor(id) {
+  return `var(--book-${bookColorIndex(id)})`;
 }
 
 /* ---------- 主题与图表 ---------- */
@@ -160,6 +165,13 @@ function disposeCharts() {
 
 window.addEventListener("resize", () => {
   Object.values(state.charts).forEach((c) => c.resize());
+  if (state.timeline) {
+    try {
+      state.timeline.redraw();
+    } catch (err) {
+      /* 已销毁 */
+    }
+  }
 });
 
 window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", disposeCharts);
@@ -182,7 +194,17 @@ function switchView(view) {
 
   if (view === "stats") {
     if (!state.loaded.stats) loadStats();
-    else setTimeout(() => Object.values(state.charts).forEach((c) => c.resize()), 30);
+    else setTimeout(() => {
+      Object.values(state.charts).forEach((c) => c.resize());
+      // 视图从 display:none 切回来后，vis 需要重新量一次尺寸
+      if (state.timeline) {
+        try {
+          state.timeline.redraw();
+        } catch (err) {
+          /* 已销毁 */
+        }
+      }
+    }, 30);
   }
   if (view === "library" && !state.loaded.library) loadFiles(state.path);
   if (view === "device") loadStatus();
@@ -558,6 +580,9 @@ function paintSpans(cal) {
     el.style.marginTop = `calc(21px + ${s.lane} * 14px)`;
     el.style.background = bookColor(s.id);
     el.title = `${s.title} · ${s.days} 天`;
+    // 色条浮在日格之上，不转发点击的话点到色条就选不中这一天
+    const dayDate = cal.days[s.start_day] ? cal.days[s.start_day].date : null;
+    if (dayDate) el.onclick = () => selectDate(dayDate);
     const label = document.createElement("span");
     label.textContent = s.title;
     el.appendChild(label);
@@ -601,30 +626,21 @@ async function loadDay(date) {
 }
 
 function paintTimeline(day) {
-  const dt = parseDate(day.date);
-  $("#tlDate").textContent =
-    `${day.date} ${WEEK_FULL[day.weekday - 1]}`;
+  $("#tlDate").textContent = `${day.date} ${WEEK_FULL[day.weekday - 1]}`;
   $("#tlSummary").textContent = day.seconds
     ? `${fmtDuration(day.seconds)} · ${day.page_records} 次翻页 · ${day.books.length} 本书`
     : "没有阅读记录";
 
   const wrap = $("#tlWrap");
-  wrap.innerHTML = "";
-
-  const head = document.createElement("div");
-  head.className = "tl-head";
-  head.innerHTML = '<span class="tl-head-label"></span><div class="tl-axis"></div>';
-  const axis = head.querySelector(".tl-axis");
-  for (let h = 0; h <= 24; h += 3) {
-    const t = document.createElement("span");
-    t.textContent = String(h).padStart(2, "0");
-    t.style.left = `${(h / 24) * 100}%`;
-    // 首尾刻度贴边，否则会有一半溢出到卡片外
-    if (h === 0) t.style.transform = "translateX(0)";
-    else if (h === 24) t.style.transform = "translateX(-100%)";
-    axis.appendChild(t);
+  if (state.timeline) {
+    try {
+      state.timeline.destroy();
+    } catch (err) {
+      /* 容器已移除，忽略 */
+    }
+    state.timeline = null;
   }
-  wrap.appendChild(head);
+  wrap.innerHTML = "";
 
   if (!day.books.length) {
     const empty = document.createElement("div");
@@ -634,39 +650,66 @@ function paintTimeline(day) {
     return;
   }
 
+  const dayStart = parseDate(day.date).getTime();
+  const dayEnd = dayStart + 86400000;
   const isToday = day.date === isoOf(new Date());
-  const nowSec = isToday
-    ? (new Date().getHours() * 3600 + new Date().getMinutes() * 60 + new Date().getSeconds())
-    : null;
 
-  day.books.forEach((b) => {
-    const row = document.createElement("div");
-    row.className = "tl-row";
-
+  // 每本书一个分组（行），左侧标签用 DOM，避免库把 HTML 当纯文本
+  const groups = new vis.DataSet(day.books.map((b) => {
     const label = document.createElement("div");
-    label.className = "tl-label";
-    label.innerHTML = `<i class="swatch" style="background:${bookColor(b.id)}"></i><span title="${escapeHtml(b.title)}">${escapeHtml(b.title)}</span><em>${Math.round((b.raw_seconds || b.seconds) / 60)} 分</em>`;
-    row.appendChild(label);
+    label.className = "vt-group";
+    const sw = document.createElement("i");
+    sw.className = "swatch";
+    sw.style.background = bookColor(b.id);
+    const name = document.createElement("span");
+    name.textContent = b.title;
+    name.title = b.title;
+    const mins = document.createElement("em");
+    const m = (b.raw_seconds || b.seconds) / 60;
+    mins.textContent = m < 1 ? "<1 分" : `${Math.round(m)} 分`;
+    label.append(sw, name, mins);
+    return { id: b.id, content: label };
+  }));
 
-    const track = document.createElement("div");
-    track.className = "tl-track";
+  const items = [];
+  day.books.forEach((b) => {
     b.periods.forEach((p) => {
-      const block = document.createElement("i");
-      block.className = "tl-block";
-      block.style.background = bookColor(b.id);
-      block.style.left = `${(p.start / 86400) * 100}%`;
-      block.style.width = `${Math.max(0.14, ((p.finish - p.start) / 86400) * 100)}%`;
-      block.title = `${fmtClock(p.start)} – ${fmtClock(p.finish)} · ${Math.max(1, Math.round((p.finish - p.start) / 60))} 分钟`;
-      track.appendChild(block);
+      const minutes = Math.max(1, Math.round((p.finish - p.start) / 60));
+      items.push({
+        group: b.id,
+        start: new Date(dayStart + p.start * 1000),
+        end: new Date(dayStart + p.finish * 1000),
+        title: `${fmtClock(p.start)} – ${fmtClock(p.finish)} · ${minutes} 分钟`,
+        className: `kwp-item bk-${bookColorIndex(b.id)}`,
+      });
     });
-    if (nowSec != null) {
-      const mark = document.createElement("span");
-      mark.className = "tl-now";
-      mark.style.left = `${(nowSec / 86400) * 100}%`;
-      track.appendChild(mark);
-    }
-    row.appendChild(track);
-    wrap.appendChild(row);
+  });
+
+  const canvas = document.createElement("div");
+  canvas.className = "tl-canvas";
+  canvas.style.height = `${Math.max(100, day.books.length * 30 + 50)}px`;
+  wrap.appendChild(canvas);
+
+  state.timeline = new vis.Timeline(canvas, new vis.DataSet(items), groups, {
+    start: new Date(dayStart),
+    end: new Date(dayEnd),
+    min: new Date(dayStart),
+    max: new Date(dayEnd),
+    timeAxis: { scale: "hour", step: 3 },
+    orientation: { axis: "top" },
+    showCurrentTime: isToday,
+    stack: false,
+    moveable: true,
+    zoomable: true,
+    zoomMin: 1000 * 60 * 60,
+    zoomMax: 1000 * 60 * 60 * 24,
+    height: "100%",
+    margin: { axis: 10, item: { horizontal: 0, vertical: 3 } },
+    tooltip: { followMouse: true, overflowMethod: "cap" },
+    format: {
+      minorLabels: { hour: "HH:mm", minute: "HH:mm" },
+      majorLabels: { hour: "M月D日" },
+    },
   });
 
   const foot = document.createElement("div");
@@ -676,7 +719,7 @@ function paintTimeline(day) {
   const last = day.books.reduce(
     (max, b) => Math.max(max, b.periods.length ? b.periods[b.periods.length - 1].finish : 0), 0);
   foot.innerHTML = `<span>从 <b>${fmtClock(first)}</b> 读到 <b>${fmtClock(last)}</b></span>
-    <span>30 秒内的间隙算作连续阅读</span>`;
+    <span>滚轮缩放 · 拖动平移 · 30 秒内的间隙算作连续阅读</span>`;
   wrap.appendChild(foot);
 }
 

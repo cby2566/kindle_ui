@@ -60,9 +60,23 @@ app/config.py    本地配置持久化（设备地址、端口）
 app/device.py    SSH/SFTP 封装、设备状态采集、局域网 IP 扫描
 app/stats.py     统计库解析 → 前端可直接绘图的结构
 app/server.py    REST 接口与静态资源
-web/             前端（index.html / app.js / style.css / vendor/echarts.min.js）
+web/             前端（index.html / app.js / style.css）
+web/vendor/      离线内置的第三方库：echarts 5.5.1、vis-timeline 7.7.3
 run.py           启动入口
 ```
+
+## 前端依赖
+
+只有两个，都放在 `web/vendor/` 里本地加载，不依赖 CDN：
+
+| 库 | 版本 | 许可 | 用途 |
+|---|---|---|---|
+| ECharts | 5.5.1 | Apache-2.0 | 每日时长、时段偏好的柱状图 |
+| vis-timeline | 7.7.3 | Apache-2.0 / MIT 双许可 | 单日时间轴（缩放、平移、时间刻度） |
+
+日历视图**没有用任何日历库**，是用 CSS Grid 手写的：月历网格 + 跨天色条用同模板的
+覆盖层定位（`grid-column: N / span 天数`）+ 每格内嵌 24 小时直方图。跨天合并算法
+对齐 KOReader 的 `CalendarWeek:addDay`（`span_days`）。
 
 ## 注意事项
 

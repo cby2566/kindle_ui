@@ -983,98 +983,130 @@ button, input { font: inherit; color: inherit; }
 
 .cal-hint { font-size: 11.5px; color: var(--muted); }
 
-/* ---------- 时间轴 ---------- */
+/* ---------- 时间轴（vis-timeline） ---------- */
 
-.tl-wrap { padding-top: 2px; }
+.tl-wrap { padding-top: 4px; }
 
-.tl-head { display: flex; align-items: flex-end; margin-bottom: 4px; }
-
-.tl-head-label { width: 190px; flex: none; }
-
-.tl-axis {
-  flex: 1;
-  position: relative;
-  height: 15px;
-  border-bottom: 1px solid var(--border);
+.tl-canvas {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  background: var(--panel);
 }
 
-.tl-axis span {
-  position: absolute;
-  bottom: 2px;
-  transform: translateX(-50%);
-  font-size: 10.5px;
+.vis-timeline {
+  border: 0;
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--text);
+}
+
+/* vendor 里写死了一批浅色背景，深色模式下会露出白块 */
+.vis-timeline,
+.vis-panel.vis-left,
+.vis-panel.vis-center,
+.vis-panel.vis-top,
+.vis-panel.vis-bottom,
+.vis-panel.vis-background,
+.vis-time-axis,
+.vis-labelset,
+.vis-labelset .vis-label,
+.vis-itemset {
+  background: transparent;
+}
+
+.vis-panel.vis-left,
+.vis-panel.vis-center,
+.vis-panel.vis-top {
+  border-color: var(--border);
+}
+
+.vis-time-axis .vis-text {
   color: var(--muted);
+  font-size: 11px;
+  padding: 3px 0 2px;
   font-variant-numeric: tabular-nums;
 }
 
-.tl-row {
-  display: flex;
-  align-items: center;
-  height: 27px;
+.vis-time-axis .vis-grid.vis-minor { border-color: var(--border); }
+.vis-time-axis .vis-grid.vis-major { border-color: var(--border-strong); }
+
+.vis-labelset .vis-label {
+  border-bottom: 0;
+  padding: 0 8px;
+  line-height: 1;
 }
 
-.tl-label {
-  width: 190px;
-  flex: none;
+.vis-labelset .vis-label .vis-inner { height: 100%; }
+
+.vt-group {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding-right: 12px;
+  width: 178px;
+  height: 26px;
   font-size: 12.5px;
-  min-width: 0;
 }
 
-.tl-label span {
+.vt-group span {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  flex: 1;
+  min-width: 0;
 }
 
-.tl-label em {
+.vt-group em {
   font-style: normal;
   font-size: 11px;
   color: var(--muted);
-  margin-left: auto;
   flex: none;
   font-variant-numeric: tabular-nums;
 }
 
-.tl-track {
-  flex: 1;
-  position: relative;
-  height: 15px;
+.vis-item {
+  border-width: 0;
   border-radius: 3px;
-  background:
-    repeating-linear-gradient(to right, var(--border) 0 1px, transparent 1px calc(100% / 24)),
-    var(--panel-2);
+  opacity: .9;
 }
 
-.tl-block {
-  position: absolute;
-  top: 2px;
-  bottom: 2px;
-  min-width: 2px;
-  border-radius: 2px;
-  opacity: .85;
+/* vis 不认 item.style，颜色只能靠 className；与日历/排行榜共用同一套色 */
+.vis-item.bk-1 { background: var(--book-1); border-color: var(--book-1); }
+.vis-item.bk-2 { background: var(--book-2); border-color: var(--book-2); }
+.vis-item.bk-3 { background: var(--book-3); border-color: var(--book-3); }
+.vis-item.bk-4 { background: var(--book-4); border-color: var(--book-4); }
+.vis-item.bk-5 { background: var(--book-5); border-color: var(--book-5); }
+.vis-item.bk-6 { background: var(--book-6); border-color: var(--book-6); }
+.vis-item.bk-7 { background: var(--book-7); border-color: var(--book-7); }
+.vis-item.bk-8 { background: var(--book-8); border-color: var(--book-8); }
+
+.vis-item:hover { opacity: 1; }
+
+.vis-item.vis-selected {
+  box-shadow: 0 0 0 1.5px var(--text);
+  opacity: 1;
 }
 
-.tl-block:hover { opacity: 1; }
+.vis-current-time { background: var(--danger); width: 1.5px; opacity: .85; }
 
-.tl-now {
-  position: absolute;
-  top: -3px;
-  bottom: -3px;
-  width: 1px;
-  background: var(--danger);
-  opacity: .8;
+.vis-tooltip {
+  background: var(--panel) !important;
+  border: 1px solid var(--border) !important;
+  color: var(--text) !important;
+  border-radius: 6px;
+  font-size: 12px;
+  padding: 5px 9px;
+  box-shadow: var(--shadow);
 }
+
+.vis-panel.vis-background .vis-grid { border-color: transparent; }
 
 .tl-foot {
   display: flex;
   justify-content: space-between;
   gap: 16px;
   margin-top: 8px;
-  padding-left: 190px;
   font-size: 11.5px;
   color: var(--muted);
   flex-wrap: wrap;
@@ -1100,8 +1132,7 @@ button, input { font: inherit; color: inherit; }
 .col-rank { display: flex; align-items: center; gap: 7px; }
 
 @media (max-width: 900px) {
-  .tl-label, .tl-head-label { width: 120px; }
-  .tl-foot { padding-left: 120px; }
+  .vt-group { width: 108px; }
   .cal-wrap { overflow-x: auto; }
   .cal-grid, .cal-spans { min-width: 560px; }
 }
