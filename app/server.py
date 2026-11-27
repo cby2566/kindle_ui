@@ -13,11 +13,12 @@ from fastapi import Body, FastAPI, File, Form, HTTPException, Response, UploadFi
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import config, device as dev, stats
+from . import battery, config, device as dev, stats
 
 app = FastAPI(title="KWP UI", docs_url="/api/docs", openapi_url="/api/openapi.json")
 
 CACHE = stats.StatsCache()
+BATTERY = battery.BatteryStore()
 DOWNLOAD_DIR = config.CACHE_DIR / "downloads"
 
 
@@ -200,6 +201,42 @@ def export_sessions(period: str = "7d", book: int = 0, save: int = 0):
                  "X-Kwp-Rows": str(len(data["sessions"])),
                  "Cache-Control": "no-store"},
     )
+
+
+# ---------- 电池 ----------
+
+# 采集走 POST /api/battery/sample：只有它连设备，其余接口纯本地读库。
+# 本地模式（local=1）是红线：sample 也退化成只读，不产生任何设备连接。
+
+
+@app.post("/api/battery/sample")
+def battery_sample(local: int = 0):
+    return BATTERY.sample(dev.Kindle(), local=bool(local))
+
+
+@app.get("/api/battery/overview")
+def battery_overview():
+    return BATTERY.overview()
+
+
+@app.get("/api/battery/cycles")
+def battery_cycles(limit: int = 30):
+    return BATTERY.cycles(max(1, min(limit, 500)))
+
+
+@app.get("/api/battery/daily")
+def battery_daily(days: int = 30):
+    return BATTERY.daily(max(1, min(days, 365)))
+
+
+@app.get("/api/battery/snapshots")
+def battery_snapshots(limit: int = 200):
+    return BATTERY.snapshots(max(1, min(limit, 1000)))
+
+
+@app.post("/api/battery/rebuild")
+def battery_rebuild():
+    return BATTERY.rebuild()
 
 
 # ---------- 书库 ----------
