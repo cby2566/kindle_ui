@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KWP UI</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="app">
+
+  <aside class="rail">
+    <div class="brand">
+      <span class="brand-mark"></span>
+      <span class="brand-name">KWP<em>UI</em></span>
+    </div>
+
+    <nav class="nav">
+      <button class="nav-item is-active" data-view="stats">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 16V9m4.5 7V4m4.5 12v-5m4.5 5V7"/></svg>
+        <span>阅读统计</span>
+      </button>
+      <button class="nav-item" data-view="library">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 5.5h5l1.5 2H17v8.5H3z"/></svg>
+        <span>书库</span>
+      </button>
+      <button class="nav-item" data-view="device">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="5" y="3" width="10" height="14" rx="1.5"/><path d="M8.5 14.5h3"/></svg>
+        <span>设备</span>
+      </button>
+    </nav>
+
+    <div class="rail-foot">
+      <div class="device-chip" id="deviceChip">
+        <span class="dot" id="deviceDot"></span>
+        <div class="device-chip-text">
+          <b id="chipHost">未连接</b>
+          <span id="chipSub">点击扫描设备</span>
+        </div>
+      </div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="topbar">
+      <div>
+        <h1 id="pageTitle">阅读统计</h1>
+        <p class="subtitle" id="pageSub">正在读取设备数据…</p>
+      </div>
+      <div class="topbar-actions" id="pageActions"></div>
+    </header>
+
+    <div class="banner" id="offlineBanner" hidden>
+      <span id="offlineText">设备未连接</span>
+      <button class="btn btn-ghost" id="bannerScan">扫描设备</button>
+    </div>
+
+    <section class="view is-active" id="view-stats">
+      <div class="kpis">
+        <div class="kpi">
+          <span class="kpi-label">累计阅读</span>
+          <b class="kpi-value" id="kpiTotal">—</b>
+          <span class="kpi-foot" id="kpiTotalFoot">—</span>
+        </div>
+        <div class="kpi">
+          <span class="kpi-label">本周阅读</span>
+          <b class="kpi-value" id="kpiWeek">—</b>
+          <span class="kpi-foot" id="kpiWeekFoot">—</span>
+        </div>
+        <div class="kpi">
+          <span class="kpi-label">连续阅读</span>
+          <b class="kpi-value" id="kpiStreak">—</b>
+          <span class="kpi-foot" id="kpiStreakFoot">—</span>
+        </div>
+        <div class="kpi">
+          <span class="kpi-label">读过的书</span>
+          <b class="kpi-value" id="kpiBooks">—</b>
+          <span class="kpi-foot" id="kpiBooksFoot">—</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <h2>阅读日历</h2>
+          <span class="card-hint" id="calHint">近 12 个月</span>
+        </div>
+        <div class="chart chart-cal" id="calChart"></div>
+      </div>
+
+      <div class="grid-2">
+        <div class="card">
+          <div class="card-head">
+            <h2>每日时长</h2>
+            <span class="card-hint">近 30 天 / 分钟</span>
+          </div>
+          <div class="chart" id="dailyChart"></div>
+        </div>
+        <div class="card">
+          <div class="card-head">
+            <h2>时段偏好</h2>
+            <span class="card-hint">累计 / 分钟</span>
+          </div>
+          <div class="chart" id="hourChart"></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <h2>书籍排行</h2>
+          <span class="card-hint" id="booksHint"></span>
+        </div>
+        <div class="table-wrap">
+          <table class="table" id="booksTable">
+            <thead>
+              <tr><th class="col-rank">#</th><th>书名</th><th class="col-num">时长</th><th class="col-progress">进度</th><th class="col-date">最近阅读</th></tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section class="view" id="view-library">
+      <div class="card card-flush">
+        <div class="lib-toolbar">
+          <div class="crumbs" id="crumbs"></div>
+          <div class="lib-actions">
+            <button class="btn" id="btnMkdir">新建文件夹</button>
+            <button class="btn btn-primary" id="btnUpload">上传文件</button>
+            <input type="file" id="fileInput" multiple hidden>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table class="table table-files">
+            <thead>
+              <tr><th>名称</th><th class="col-size">大小</th><th class="col-date">修改时间</th><th class="col-ops">操作</th></tr>
+            </thead>
+            <tbody id="filesBody"></tbody>
+          </table>
+        </div>
+        <div class="empty" id="filesEmpty" hidden>这个文件夹是空的</div>
+      </div>
+      <p class="tip">支持把文件直接拖进窗口上传到当前目录 · 删除不可恢复，操作前会二次确认</p>
+    </section>
+
+    <section class="view" id="view-device">
+      <div class="grid-2">
+        <div class="card">
+          <div class="card-head"><h2>电池</h2><span class="card-hint" id="battState">—</span></div>
+          <div class="gauge">
+            <div class="gauge-ring" id="battRing"><span id="battPct">—</span></div>
+            <div class="gauge-meta">
+              <b id="battLabel">—</b>
+              <span id="battHint">—</span>
+            </div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-head"><h2>存储空间</h2><span class="card-hint">/mnt/us</span></div>
+          <div class="storage">
+            <div class="bar"><i id="storeBar"></i></div>
+            <div class="storage-legend">
+              <span><b id="storeFree">—</b> 可用</span>
+              <span><b id="storeUsed">—</b> 已用</span>
+              <span><b id="storeTotal">—</b> 总计</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h2>设备信息</h2><span class="card-hint" id="latencyHint">—</span></div>
+        <dl class="info" id="deviceInfo"></dl>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h2>连接设置</h2><span class="card-hint">IP 由 DHCP 分配，可能变化</span></div>
+        <div class="connect-row">
+          <label class="field">
+            <span>设备地址</span>
+            <input id="hostInput" placeholder="192.168.31.215">
+          </label>
+          <label class="field field-sm">
+            <span>端口</span>
+            <input id="portInput" placeholder="2222">
+          </label>
+          <button class="btn btn-primary" id="btnSaveHost">保存并连接</button>
+          <button class="btn" id="btnScan">扫描局域网</button>
+        </div>
+        <div class="scan-result" id="scanResult"></div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div class="drop-mask" id="dropMask"><div>松开即可上传到当前目录</div></div>
+<div class="toasts" id="toasts"></div>
+
+<script src="/static/vendor/echarts.min.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>
