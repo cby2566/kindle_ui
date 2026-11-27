@@ -122,6 +122,22 @@ def get_day(date: str = ""):
     return data
 
 
+@app.get("/api/stats/week")
+def get_week(start: str = ""):
+    if start:
+        try:
+            anchor = dt.date.fromisoformat(start)
+        except ValueError:
+            raise HTTPException(400, "起始日期格式应为 YYYY-MM-DD")
+    else:
+        anchor = dt.date.today()
+    # 传任意一天都归到所在周的周一，前端不必自己算
+    data = CACHE.week(stats.week_start_of(anchor))
+    data["today"] = dt.date.today().isoformat()
+    data.update(_cache_state())
+    return data
+
+
 # ---------- 书库 ----------
 
 @app.get("/api/files")

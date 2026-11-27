@@ -144,6 +144,15 @@ class StatsCache:
         finally:
             con.close()
 
+    def week(self, start):
+        if not self.db_path.exists():
+            return empty_week(start)
+        con = self._connect()
+        try:
+            return build_week(con, start)
+        finally:
+            con.close()
+
 
 # ---------- 通用 ----------
 
@@ -477,6 +486,156 @@ def build_day(con, date):
     }
 
 
+# ---------- 周视图 ----------
+
+def build_week(con, start):
+    """某一周（周一起算）的聚合。
+
+    一次查询覆盖「本周 7 天 + 上周同 7 天」，避免前端逐日拉 7 次 SSH：
+    * days[] 逐日明细，带当天书目，供柱状图与明细表
+    * books[] 本周书目占比
+    * prev / delta_pct 上周同窗口，供环比
+    """
+    end = start + dt.timedelta(days=6)
+    prev_start = start - dt.timedelta(days=7)
+    prev_end = start - dt.timedelta(days=1)
+
+    lo = int(dt.datetime.combine(prev_start, dt.time.min).timestamp())
+    hi = int(dt.datetime.combine(end, dt.time.max).timestamp())
+
+    rows = con.execute(
+        "SELECT id_book, page, start_time, duration FROM page_stat_data "
+        "WHERE duration > 0 AND start_time BETWEEN ? AND ? ORDER BY start_time",
+        (lo, hi)).fetchall()
+    meta = _books_meta(con)
+
+    bucket = {}
+    for bid, page, ts, duration in rows:
+        d = dt.datetime.fromtimestamp(ts).date()
+        cell = bucket.setdefault(d, {"seconds": 0, "records": 0, "books": {}})
+        cell["seconds"] += duration
+        cell["records"] += 1
+        b = cell["books"].setdefault(bid, {"seconds": 0, "records": 0})
+        b["seconds"] += duration
+        b["records"] += 1
+
+    def window_total(from_d, to_d):
+        seconds = records = active = 0
+        cursor = from_d
+        while cursor <= to_d:
+            cell = bucket.get(cursor)
+            if cell:
+                seconds += cell["seconds"]
+                records += cell["records"]
+                if cell["seconds"] > 0:
+                    active += 1
+            cursor += dt.timedelta(days=1)
+        return seconds, records, active
+
+    this_seconds, this_records, this_active = window_total(start, end)
+    prev_seconds, prev_records, prev_active = window_total(prev_start, prev_end)
+
+    # 上周逐日，供前端在柱状图上画对照虚线
+    prev_days = []
+    for i in range(7):
+        d = prev_start + dt.timedelta(days=i)
+        cell = bucket.get(d)
+        seconds = cell["seconds"] if cell else 0
+        prev_days.append({
+            "date": d.isoformat(),
+            "weekday": d.isoweekday(),
+            "seconds": int(seconds),
+            "minutes": round(seconds / 60.0, 1),
+        })
+
+    days = []
+    max_day = 1
+    for i in range(7):
+        d = start + dt.timedelta(days=i)
+        cell = bucket.get(d)
+        seconds = cell["seconds"] if cell else 0
+        max_day = max(max_day, seconds)
+        books_today = []
+        if cell:
+            for bid, acc in sorted(cell["books"].items(),
+                                   key=lambda kv: kv[1]["seconds"], reverse=True):
+                books_today.append({
+                    "id": bid,
+                    "title": meta.get(bid, {}).get("title", "未命名"),
+                    "seconds": int(acc["seconds"]),
+                    "records": int(acc["records"]),
+                })
+        days.append({
+            "date": d.isoformat(),
+            "weekday": d.isoweekday(),
+            "seconds": int(seconds),
+            "minutes": round(seconds / 60, 1),
+            "records": int(cell["records"]) if cell else 0,
+            "books": books_today,
+        })
+
+    # 本周书目占比
+    week_books = {}
+    for d in range(7):
+        cell = bucket.get(start + dt.timedelta(days=d))
+        if not cell:
+            continue
+        for bid, acc in cell["books"].items():
+            entry = week_books.setdefault(bid, {"seconds": 0, "records": 0, "days": set()})
+            entry["seconds"] += acc["seconds"]
+            entry["records"] += acc["records"]
+            entry["days"].add(d)
+    books = []
+    for bid, acc in sorted(week_books.items(), key=lambda kv: kv[1]["seconds"], reverse=True):
+        books.append({
+            "id": bid,
+            "title": meta.get(bid, {}).get("title", "未命名"),
+            "seconds": int(acc["seconds"]),
+            "records": int(acc["records"]),
+            "days": len(acc["days"]),
+            "share": round(acc["seconds"] * 100.0 / this_seconds, 1) if this_seconds else 0,
+        })
+
+    iso = start.isocalendar()
+    delta_pct = None
+    if prev_seconds:
+        delta_pct = round((this_seconds - prev_seconds) * 100.0 / prev_seconds, 1)
+
+    return {
+        "start": start.isoformat(),
+        "end": end.isoformat(),
+        "iso_year": iso[0],
+        "iso_week": iso[1],
+        "week_start": WEEK_START,
+        "is_current": start <= dt.date.today() <= end,
+        "overview": {
+            "seconds": int(this_seconds),
+            "avg_minutes": round(this_seconds / 60.0 / this_active, 1) if this_active else 0,
+            "records": int(this_records),
+            "active_days": this_active,
+            "total_days": 7,
+            "book_count": len(books),
+        },
+        "prev": {
+            "start": prev_start.isoformat(),
+            "end": prev_end.isoformat(),
+            "seconds": int(prev_seconds),
+            "records": int(prev_records),
+            "active_days": prev_active,
+            "days": prev_days,
+        },
+        "delta_pct": delta_pct,
+        "days": days,
+        "books": books,
+        "max_day_seconds": int(max_day),
+    }
+
+
+def week_start_of(date):
+    """把任意一天规整到所在周的周一。"""
+    return date - dt.timedelta(days=date.weekday())
+
+
 # ---------- 空数据 ----------
 
 def empty_snapshot(range_key="all"):
@@ -508,4 +667,45 @@ def empty_day(date):
     return {
         "date": date.isoformat(), "weekday": date.isoweekday(),
         "seconds": 0, "page_records": 0, "books": [], "day_start_ts": 0,
+    }
+
+
+def empty_week(start):
+    end = start + dt.timedelta(days=6)
+    iso = start.isocalendar()
+    return {
+        "start": start.isoformat(),
+        "end": end.isoformat(),
+        "iso_year": iso[0],
+        "iso_week": iso[1],
+        "week_start": WEEK_START,
+        "is_current": start <= dt.date.today() <= end,
+        "overview": {
+            "seconds": 0, "avg_minutes": 0, "records": 0,
+            "active_days": 0, "total_days": 7, "book_count": 0,
+        },
+        "prev": {
+            "start": (start - dt.timedelta(days=7)).isoformat(),
+            "end": (start - dt.timedelta(days=1)).isoformat(),
+            "seconds": 0, "records": 0, "active_days": 0,
+            "days": [
+                {
+                    "date": (start - dt.timedelta(days=7 - i)).isoformat(),
+                    "weekday": (start - dt.timedelta(days=7 - i)).isoweekday(),
+                    "seconds": 0, "minutes": 0.0,
+                }
+                for i in range(7)
+            ],
+        },
+        "delta_pct": None,
+        "days": [
+            {
+                "date": (start + dt.timedelta(days=i)).isoformat(),
+                "weekday": (start + dt.timedelta(days=i)).isoweekday(),
+                "seconds": 0, "minutes": 0.0, "records": 0, "books": [],
+            }
+            for i in range(7)
+        ],
+        "books": [],
+        "max_day_seconds": 1,
     }
