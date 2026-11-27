@@ -9,7 +9,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from fastapi import Body, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Body, FastAPI, File, Form, HTTPException, Response, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -137,6 +137,44 @@ def get_week(start: str = ""):
     data["today"] = dt.date.today().isoformat()
     data.update(_cache_state())
     return data
+
+
+# ---------- 洞察 / 阅读记录（只读缓存，不碰设备） ----------
+
+@app.get("/api/stats/insights")
+def get_insights(range: str = "all"):
+    if range not in stats.RANGE_LABELS:
+        raise HTTPException(400, "不支持的时间范围：{}".format(range))
+    data = CACHE.insights(range)
+    data.update(_cache_state())
+    return data
+
+
+def _session_args(period, book):
+    if period not in stats.SESSION_PERIODS:
+        raise HTTPException(400, "不支持的时间范围：{}".format(period))
+    return period, book or None
+
+
+@app.get("/api/stats/sessions")
+def get_sessions(period: str = "7d", book: int = 0, limit: int = 500):
+    p, b = _session_args(period, book)
+    data = CACHE.sessions(p, b, max(1, min(limit, 1000)))
+    data.update(_cache_state())
+    return data
+
+
+@app.get("/api/stats/sessions/export")
+def export_sessions(period: str = "7d", book: int = 0):
+    """整份清单导出成 CSV，不受列表的条数上限影响。"""
+    p, b = _session_args(period, book)
+    name = "kwp-sessions-{}.csv".format(dt.date.today().strftime("%Y%m%d"))
+    return Response(
+        content=stats.sessions_csv(CACHE.sessions(p, b, limit=None)),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": 'attachment; filename="{}"'.format(name),
+                 "Cache-Control": "no-store"},
+    )
 
 
 # ---------- 书库 ----------

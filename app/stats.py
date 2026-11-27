@@ -15,7 +15,9 @@
     page_stat_data(id_book, page, start_time, duration, total_pages)
 时间戳是 Unix 秒，由设备按本地时区记录。
 """
+import csv
 import datetime as dt
+import io
 import sqlite3
 import time
 from pathlib import Path
@@ -167,6 +169,24 @@ class StatsCache:
         con = self._connect()
         try:
             return build_week(con, start)
+        finally:
+            con.close()
+
+    def insights(self, range_key="all"):
+        if not self.db_path.exists():
+            return empty_insights(range_key)
+        con = self._connect()
+        try:
+            return build_insights(con, range_key)
+        finally:
+            con.close()
+
+    def sessions(self, period="7d", book=None, limit=500):
+        if not self.db_path.exists():
+            return empty_sessions(period)
+        con = self._connect()
+        try:
+            return build_sessions(con, period, book, limit)
         finally:
             con.close()
 
@@ -653,6 +673,285 @@ def week_start_of(date):
     return date - dt.timedelta(days=date.weekday())
 
 
+# ---------- 洞察 ----------
+
+SESSION_GAP_SEC = 15 * 60     # 相邻两次翻页间隔超过它，就算新的一次阅读
+SESSION_PERIODS = {
+    "today": "今天",
+    "7d": "近 7 天",
+    "30d": "近 30 天",
+    "month": "本月",
+    "all": "全部",
+}
+
+
+def _merge_sessions(rows):
+    """把翻页记录合成「一次阅读」：相邻两页间隔不超过 SESSION_GAP_SEC 就算同一次。
+
+    rows 须按 start_time 升序；中途换书不打断一次阅读。
+    end 取最后一页的开始时间加它的 duration，即合上书的大致时刻。
+    """
+    sessions = []
+    for bid, _page, ts, duration in rows:
+        if sessions and ts - sessions[-1]["end"] <= SESSION_GAP_SEC:
+            s = sessions[-1]
+            s["end"] = max(s["end"], ts + duration)
+            s["seconds"] += duration
+            s["records"] += 1
+            if bid not in s["books"]:
+                s["books"].append(bid)
+        else:
+            sessions.append({"start": ts, "end": ts + duration, "seconds": duration,
+                             "records": 1, "books": [bid]})
+    return sessions
+
+
+def _prev_window(range_key, now):
+    """与当前范围同口径的上一段完整区间：今天对昨天、本周对上周、本月对上月、今年对去年。"""
+    today = now.date()
+    if range_key == "today":
+        return today - dt.timedelta(days=1), today - dt.timedelta(days=1)
+    if range_key == "week":
+        monday = today - dt.timedelta(days=today.weekday())
+        return monday - dt.timedelta(days=7), monday - dt.timedelta(days=1)
+    if range_key == "month":
+        prev_last = today.replace(day=1) - dt.timedelta(days=1)
+        return prev_last.replace(day=1), prev_last
+    if range_key == "year":
+        return dt.date(today.year - 1, 1, 1), dt.date(today.year - 1, 12, 31)
+    return None
+
+
+def _fact_window(hour_sum, total):
+    """最集中的时段：能覆盖一半阅读的最短连续小时窗口，可跨午夜。"""
+    for length in range(1, 13):
+        sums = [sum(hour_sum[(start + k) % 24] for k in range(length)) for start in range(24)]
+        best = max(sums)
+        if best * 2 >= total:
+            start = sums.index(best)
+            end = (start + length - 1) % 24
+            return {"kind": "window", "label": "读得最集中的时段", "start": start, "end": end,
+                    "hours": length, "share": round(best * 100.0 / total, 1)}
+    peak = max(range(24), key=lambda h: hour_sum[h])
+    return {"kind": "peak", "label": "读得最多的钟点", "hour": peak,
+            "share": round(hour_sum[peak] * 100.0 / total, 1)}
+
+
+def _fact_speed(scoped):
+    """速度最快的一天，只看读满 10 分钟的日子，避免几条记录算出离谱的页速。"""
+    per_day = {}
+    for _bid, _page, ts, duration in scoped:
+        acc = per_day.setdefault(dt.datetime.fromtimestamp(ts).date(), [0, 0])
+        acc[0] += duration
+        acc[1] += 1
+    cands = [(v[1] / (v[0] / 3600.0), d, v) for d, v in per_day.items() if v[0] >= 600]
+    if not cands:
+        return {"kind": "none", "label": "速度最快的一天", "note": "还没有哪天读满 10 分钟"}
+    speed, day, v = max(cands)
+    return {"kind": "speed_day", "label": "速度最快的一天", "date": day.isoformat(),
+            "speed": round(speed, 1), "seconds": int(v[0]), "records": int(v[1])}
+
+
+def build_insights(con, range_key="all"):
+    """规律与节奏：区间小结、月度趋势、星期 × 时段热力图、几条自动结论。
+
+    小结、热力图与结论跟随时间范围；月度趋势固定为近 12 个月，
+    落在范围内的月份高亮，方便对照。
+    """
+    rows = _page_rows(con)
+    meta = _books_meta(con)
+    now = dt.datetime.now()
+    cutoff = _cutoff(range_key, now)
+    cutoff_ts = cutoff.timestamp() if cutoff else None
+    scoped = [r for r in rows if cutoff_ts is None or r[2] >= cutoff_ts]
+
+    total = sum(r[3] for r in scoped)
+    days = {dt.datetime.fromtimestamp(r[2]).date() for r in scoped}
+    book_ids = {r[0] for r in scoped}
+
+    prev = _prev_window(range_key, now)
+    prev_seconds = None
+    delta_pct = None
+    if prev:
+        lo = int(dt.datetime.combine(prev[0], dt.time.min).timestamp())
+        hi = int(dt.datetime.combine(prev[1], dt.time.max).timestamp())
+        prev_seconds = sum(r[3] for r in rows if lo <= r[2] <= hi)
+        if prev_seconds:
+            delta_pct = round((total - prev_seconds) * 100.0 / prev_seconds, 1)
+
+    sessions = _merge_sessions(scoped)
+    longest = None
+    if sessions:
+        top = max(sessions, key=lambda s: s["seconds"])
+        begin = dt.datetime.fromtimestamp(top["start"])
+        finish = dt.datetime.fromtimestamp(top["end"])
+        only = top["books"][0] if len(top["books"]) == 1 else None
+        longest = {
+            "seconds": int(top["seconds"]),
+            "date": begin.date().isoformat(),
+            "start": begin.strftime("%H:%M"),
+            "end": finish.strftime("%H:%M"),
+            "books": len(top["books"]),
+            "title": meta.get(only, {}).get("title") if only is not None else None,
+        }
+
+    grid = [[0] * 24 for _ in range(7)]
+    hour_sum = [0] * 24
+    weekday_sum = [0] * 7
+    for _bid, _page, ts, duration in scoped:
+        moment = dt.datetime.fromtimestamp(ts)
+        grid[moment.weekday()][moment.hour] += duration
+        hour_sum[moment.hour] += duration
+        weekday_sum[moment.weekday()] += duration
+    heat = [[round(grid[w][h] / 60.0, 1) for h in range(24)] for w in range(7)]
+
+    month_seconds, month_days = {}, {}
+    for _bid, _page, ts, duration in rows:
+        moment = dt.datetime.fromtimestamp(ts)
+        key = (moment.year, moment.month)
+        month_seconds[key] = month_seconds.get(key, 0) + duration
+        month_days.setdefault(key, set()).add(moment.date())
+    monthly = []
+    index = now.year * 12 + now.month - 1
+    for i in range(11, -1, -1):
+        year, month0 = divmod(index - i, 12)
+        month = month0 + 1
+        last = dt.date(year + (month == 12), month % 12 + 1, 1) - dt.timedelta(days=1)
+        monthly.append({
+            "month": "{:04d}-{:02d}".format(year, month),
+            "seconds": int(month_seconds.get((year, month), 0)),
+            "days": len(month_days.get((year, month), ())),
+            "in_range": cutoff is None or last >= cutoff.date(),
+        })
+
+    facts = []
+    if total:
+        facts.append(_fact_window(hour_sum, total))
+        if cutoff is None or (now.date() - cutoff.date()).days + 1 >= 7:
+            ranked = sorted(range(7), key=lambda w: weekday_sum[w], reverse=True)
+            top_days = [w for w in ranked[:2] if weekday_sum[w] > 0]
+            facts.append({
+                "kind": "weekdays", "label": "读得最多的日子", "weekdays": top_days,
+                "share": round(sum(weekday_sum[w] for w in top_days) * 100.0 / total, 1),
+            })
+        facts.append(_fact_speed(scoped))
+        acc = {}
+        for bid, _page, _ts, duration in scoped:
+            acc[bid] = acc.get(bid, 0) + duration
+        top_book = max(acc, key=acc.get)
+        facts.append({
+            "kind": "top_book", "label": "读得最多的一本书", "id": top_book,
+            "title": meta.get(top_book, {}).get("title", "未命名"),
+            "seconds": int(acc[top_book]), "share": round(acc[top_book] * 100.0 / total, 1),
+        })
+
+    return {
+        "range": range_key,
+        "range_label": RANGE_LABELS.get(range_key, range_key),
+        "range_start": cutoff.date().isoformat() if cutoff else None,
+        "overview": {
+            "seconds": int(total),
+            "records": len(scoped),
+            "active_days": len(days),
+            "books": len(book_ids),
+            "prev_seconds": int(prev_seconds) if prev_seconds is not None else None,
+            "delta_pct": delta_pct,
+            "session_count": len(sessions),
+            "avg_session_seconds": round(total / len(sessions)) if sessions else 0,
+            "longest": longest,
+            "speed": round(len(scoped) / (total / 3600), 1) if total else 0,
+        },
+        "monthly": monthly,
+        "heatmap": {"data": [[h, w, heat[w][h]] for w in range(7) for h in range(24)],
+                    "max_minutes": max(max(r) for r in heat)},
+        "facts": facts,
+    }
+
+
+# ---------- 阅读记录（一次阅读的清单） ----------
+
+def build_sessions(con, period="7d", book=None, limit=500, now=None):
+    """一段时间内的「一次阅读」，最新在前。limit 为 None 表示不截断。"""
+    now = now or dt.datetime.now()
+    today = now.date()
+    since = None
+    if period == "today":
+        since = today
+    elif period == "7d":
+        since = today - dt.timedelta(days=6)
+    elif period == "30d":
+        since = today - dt.timedelta(days=29)
+    elif period == "month":
+        since = today.replace(day=1)
+    lo = int(dt.datetime.combine(since, dt.time.min).timestamp()) if since else 1
+    hi = int(now.timestamp())
+
+    sql = ("SELECT id_book, page, start_time, duration FROM page_stat_data "
+           "WHERE duration > 0 AND start_time BETWEEN ? AND ?")
+    args = [lo, hi]
+    if book is not None:
+        sql += " AND id_book = ?"
+        args.append(book)
+    rows = con.execute(sql + " ORDER BY start_time", args).fetchall()
+
+    meta = _books_meta(con)
+    sessions = _merge_sessions(rows)
+    sessions.reverse()
+
+    items = []
+    for s in sessions[:limit] if limit else sessions:
+        begin = dt.datetime.fromtimestamp(s["start"])
+        finish = dt.datetime.fromtimestamp(s["end"])
+        items.append({
+            "start": int(s["start"]),
+            "end": int(s["end"]),
+            "date": begin.date().isoformat(),
+            "start_time": begin.strftime("%H:%M"),
+            "end_time": finish.strftime("%H:%M"),
+            "seconds": int(s["seconds"]),
+            "records": int(s["records"]),
+            "books": [{"id": b, "title": meta.get(b, {}).get("title", "未命名")}
+                      for b in s["books"]],
+        })
+
+    # 筛选下拉用：这段时间里出现过的书，按读得多少排。不受书筛选影响，
+    # 否则换了时间段，正选着的那本书会从下拉里消失。
+    books = [{"id": bid, "title": meta.get(bid, {}).get("title", "未命名")}
+             for (bid,) in con.execute(
+                 "SELECT id_book FROM page_stat_data "
+                 "WHERE duration > 0 AND start_time BETWEEN ? AND ? "
+                 "GROUP BY id_book ORDER BY SUM(duration) DESC", (lo, hi))]
+    if book is not None and all(b["id"] != book for b in books):
+        books.insert(0, {"id": book, "title": meta.get(book, {}).get("title", "未命名")})
+
+    return {
+        "period": period,
+        "range_label": SESSION_PERIODS.get(period, period),
+        "since": since.isoformat() if since else None,
+        "total": len(sessions),
+        "truncated": limit is not None and len(sessions) > len(items),
+        "seconds": int(sum(s["seconds"] for s in sessions)),
+        "records": int(sum(s["records"] for s in sessions)),
+        "sessions": items,
+        "books": books,
+    }
+
+
+def sessions_csv(data):
+    """把 build_sessions 的结果写成 CSV。带 BOM，Excel 直接打开中文不乱码。"""
+    buf = io.StringIO()
+    buf.write("\ufeff")
+    writer = csv.writer(buf, lineterminator="\r\n")
+    writer.writerow(["日期", "开始", "结束", "分钟", "页数", "书名"])
+    for s in data["sessions"]:
+        writer.writerow([
+            s["date"], s["start_time"], s["end_time"],
+            round(s["seconds"] / 60.0, 1), s["records"],
+            "、".join(b["title"] for b in s["books"]),
+        ])
+    return buf.getvalue()
+
+
 # ---------- 空数据 ----------
 
 def empty_snapshot(range_key="all"):
@@ -721,8 +1020,30 @@ def empty_week(start):
                 "weekday": (start + dt.timedelta(days=i)).isoweekday(),
                 "seconds": 0, "minutes": 0.0, "records": 0, "books": [],
             }
-            for i in range(7)
-        ],
+                for i in range(7)
+            ],
         "books": [],
         "max_day_seconds": 1,
+    }
+
+
+def empty_insights(range_key="all"):
+    return {
+        "range": range_key,
+        "range_label": RANGE_LABELS.get(range_key, range_key),
+        "range_start": None,
+        "overview": {
+            "seconds": 0, "records": 0, "active_days": 0, "books": 0,
+            "prev_seconds": None, "delta_pct": None,
+            "session_count": 0, "avg_session_seconds": 0, "longest": None, "speed": 0,
+        },
+        "monthly": [], "heatmap": {"data": [], "max_minutes": 0}, "facts": [],
+    }
+
+
+def empty_sessions(period="7d"):
+    return {
+        "period": period, "range_label": SESSION_PERIODS.get(period, period),
+        "since": None, "total": 0, "truncated": False,
+        "seconds": 0, "records": 0, "sessions": [], "books": [],
     }
