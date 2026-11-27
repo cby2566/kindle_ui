@@ -37,6 +37,7 @@ const state = {
   sessionShown: 0,
   sessionPeriod: "7d",
   sessionBook: "",
+  battery: null,
   loaded: { stats: false, library: false, device: false },
 };
 
@@ -185,6 +186,7 @@ function disposeCharts() {
   state.charts = {};
   if (state.loaded.stats && state.stats) paintStats();
   if (state.view === "insights" && state.insights) paintInsights(state.insights);
+  if (state.view === "battery" && state.battery) paintBattery();
 }
 
 window.addEventListener("resize", () => {
@@ -206,11 +208,12 @@ const VIEW_META = {
   stats: { title: "阅读统计", sub: "来自设备上的 KOReader 阅读记录" },
   insights: { title: "洞察", sub: "规律与节奏" },
   records: { title: "阅读记录", sub: "按「一次阅读」列出" },
+  battery: { title: "电池", sub: "按充电周期看续航与耗电节奏" },
   library: { title: "书库", sub: "/mnt/us/documents" },
   device: { title: "设备", sub: "连接状态与系统信息" },
 };
 /* 没有子页、地址栏只写 #名字 的视图 */
-const SIMPLE_VIEWS = ["library", "device", "insights", "records"];
+const SIMPLE_VIEWS = ["library", "device", "insights", "records", "battery"];
 
 function buildHash(view, sub, arg) {
   if (view !== "stats") return `#${view}`;
@@ -278,6 +281,9 @@ function applyView(view) {
   if (view === "records") {
     if (!state.loaded.stats) loadStats().then(loadSessions);
     else loadSessions();
+  }
+  if (view === "battery") {
+    loadBattery();
   }
 }
 
@@ -364,6 +370,17 @@ function paintActions() {
     box.appendChild(button("刷新", "btn", () => loadFiles(state.path)));
   } else if (state.view === "device") {
     box.appendChild(button("重新读取", "btn btn-primary", () => loadStatus(true)));
+  } else if (state.view === "battery") {
+    box.appendChild(button("立即同步", "btn btn-primary", () => sampleBattery(false)));
+    box.appendChild(button("重建周期", "btn", async () => {
+      try {
+        const r = await api("/api/battery/rebuild", { method: "POST" });
+        toast(`已从 ${r.snapshot_count} 条快照重算出 ${r.cycles} 个周期`, "ok");
+        loadBattery();
+      } catch (err) {
+        toast(err.message, "err");
+      }
+    }));
   }
 }
 
@@ -478,6 +495,8 @@ function reloadCurrent(force = true) {
     loadSessions();
   } else if (state.view === "device" && !state.local) {
     loadStatus(true);
+  } else if (state.view === "battery") {
+    loadBattery();
   } else if (state.view === "library" && !state.local) {
     loadFiles(state.path);
   }
@@ -1766,6 +1785,278 @@ async function newFolder() {
   }
 }
 
+/* ---------- 电池 ---------- */
+
+/** 剩余/充满这类可能长达几天的时长：大数字换算成天，读起来直观 */
+function fmtLongDuration(seconds) {
+  if (seconds == null) return "—";
+  if (seconds < 0) return "—";
+  if (seconds < 3600) return fmtDuration(seconds);
+  const hours = seconds / 3600;
+  return hours >= 48 ? `${(hours / 24).toFixed(1)} 天` : `${hours >= 10 ? Math.round(hours) : hours.toFixed(1)} 小时`;
+}
+
+function fmtAgo(ts) {
+  if (!ts) return "—";
+  const sec = Math.max(0, Math.round(Date.now() / 1000 - ts));
+  if (sec < 60) return "刚刚";
+  if (sec < 3600) return `${Math.round(sec / 60)} 分钟前`;
+  if (sec < 86400) return `${Math.round(sec / 3600)} 小时前`;
+  return `${Math.round(sec / 86400)} 天前`;
+}
+
+/**
+ * 电池页入口：先渲染本地数据（离线也能看历史），再在联网时后台采一次。
+ * 采样受后端 120 秒节流保护，频繁切页面不会反复连设备。
+ */
+async function loadBattery() {
+  $("#pageSub").textContent = state.local
+    ? "本地模式 · 只读电池历史，不连接设备"
+    : "电池数据 · 每次进入自动补采一次";
+  try {
+    const [ov, cyc, daily] = await Promise.all([
+      api("/api/battery/overview"),
+      api("/api/battery/cycles?limit=60"),
+      api("/api/battery/daily?days=30"),
+    ]);
+    state.battery = { ov, cyc, daily };
+    paintBattery();
+  } catch (err) {
+    toast(err.message, "err");
+    return;
+  }
+  if (!state.local) sampleBattery(true);
+}
+
+/**
+ * 采集一次。文档 §4.2：失败静默（电池页不该因设备睡着而不可用），
+ * 只在手动点击（silent=false）时把错误摆出来。
+ */
+async function sampleBattery(silent = true) {
+  if (state.local) return;                     // 红线：本地模式不采样
+  const btn = $("#btnBatSync");
+  if (btn) btn.disabled = true;
+  try {
+    const r = await api("/api/battery/sample", { method: "POST" });
+    const note = $("#batSyncAt");
+    if (r.throttled) {
+      if (note) note.textContent = `${note.textContent}（节流中，未连设备）`;
+    } else if (r.inserted || r.old_inserted) {
+      const [ov, cyc, daily] = await Promise.all([
+        api("/api/battery/overview"),
+        api("/api/battery/cycles?limit=60"),
+        api("/api/battery/daily?days=30"),
+      ]);
+      state.battery = { ov, cyc, daily };
+      paintBattery();
+      if (!silent) toast("已同步新的电池数据", "ok");
+    } else if (note) {
+      note.textContent = "电池累计量没变化（KOReader 约两小时才落一次盘）";
+    }
+  } catch (err) {
+    // 设备离线：静默保留上次数据，只在状态条上如实说「上次同步于 X」
+    if (!silent) toast(err.message, "err");
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+function paintBattery() {
+  const data = state.battery;
+  if (!data) return;
+  paintBatteryStatus(data.ov);
+  paintBatteryCycles(data.cyc);
+  paintBatteryCharts(data.cyc, data.daily);
+}
+
+function paintBatteryStatus(ov) {
+  const r = $("#batRing");
+  const empty = !ov || ov.empty;
+  $("#batEmpty").hidden = !empty;
+  $("#batCompareCard").hidden = empty;
+  $("#batCyclesCard").hidden = empty;
+  $("#batChartsRow").hidden = empty;
+  $("#btnBatEmptySync").hidden = state.local;
+  if (empty) return;
+
+  const pct = ov.capacity == null ? 0 : ov.capacity;
+  r.style.setProperty("--pct", pct);
+  $("#batPct").textContent = ov.capacity == null ? "—" : `${ov.capacity}%`;
+
+  const charging = (ov.status || "").toLowerCase();
+  if (charging === "charging") {
+    $("#batLabel").textContent = "正在充电";
+    $("#batHint").textContent = ov.time_to_full_sec
+      ? `预计 ${fmtLongDuration(ov.time_to_full_sec)} 后充满`
+      : "充电中（暂无可估算的充电速率）";
+  } else {
+    $("#batLabel").textContent = `${ov.capacity}% · 电池供电中`;
+    $("#batHint").textContent = ov.remaining_sec
+      ? `按当前节奏约可再撑 ${fmtLongDuration(ov.remaining_sec)}`
+      : "本周期内还没有可估算的耗电数据";
+  }
+  $("#batSyncAt").textContent = ov.updated_at
+    ? `上次同步：${fmtAgo(ov.updated_at)}（${fmtDateTime(ov.updated_at)}）`
+    : "尚未同步过";
+
+  const c = ov.cycle;
+
+  // 清醒 vs 睡眠：本模块的核心表达——两个速率的量级差
+  const rates = ov.rates || {};
+  $("#batAwakeRate").textContent = rates.awake_per_hour != null ? `${rates.awake_per_hour} %/h` : "—";
+  $("#batAwakeFoot").textContent = rates.awake_per_hour != null
+    ? `本期清醒 ${c ? c.awake_pct : "?"}% · ${c ? fmtDuration(c.awake_sec) : "—"}`
+    : "等待下一条快照累积数据";
+  $("#batSleepingRate").textContent = rates.sleeping_per_hour != null ? `${rates.sleeping_per_hour} %/h` : "—";
+  $("#batSleepFoot").textContent = rates.sleeping_per_hour != null
+    ? `本期睡眠 ${c ? c.sleeping_pct : "?"}% · ${c ? fmtDuration(c.sleeping_sec) : "—"}`
+    : "等待下一条快照累积数据";
+  $("#batRatio").textContent = rates.ratio != null ? `${rates.ratio} 倍` : "—";
+
+  const facts = [];
+  if (c) {
+    facts.push(["当前周期", c.days != null ? `约 ${c.days} 天` : "刚开始"]);
+    facts.push(["本期清醒", fmtDuration(c.awake_sec)]);
+    facts.push(["本期睡眠", fmtDuration(c.sleeping_sec)]);
+    facts.push(["本期耗电", `${c.discharge_pct}%（起点估计 ${c.start_pct_est}%）`]);
+    if (c.per_day_pct != null) facts.push(["日均耗电", `${c.per_day_pct}%/天`]);
+  }
+  facts.push(["累计快照", `${ov.snapshot_count} 条`]);
+  $("#batFacts").innerHTML = facts
+    .map(([k, v]) => `<div><span>${escapeHtml(k)}</span><b>${escapeHtml(String(v))}</b></div>`)
+    .join("");
+}
+
+function paintBatteryCycles(cyc) {
+  const body = $("#batCyclesTable tbody");
+  if (!cyc || !cyc.cycles || !cyc.cycles.length) {
+    $("#batCyclesCard").hidden = true;
+    return;
+  }
+  $("#batCyclesCard").hidden = false;
+  const total = cyc.cycles.length;
+  body.innerHTML = cyc.cycles.map((c, i) => {
+    const num = total - i;
+    const start = fmtDateTime(c.start_ts);
+    const end = c.closed
+      ? `${fmtDateTime(c.end_ts)}${c.boundary === "truncated" ? " †" : ""}`
+      : "进行中";
+    const charged = c.charged_pct
+      ? `${c.charged_pct}%${c.charge_sec ? ` · ${fmtDuration(c.charge_sec)}` : ""}`
+      : "—";
+    return `<tr${c.closed ? "" : ' class="is-open"'}>
+      <td class="col-rank">${num}</td>
+      <td>${escapeHtml(start)}<br><small class="muted">${escapeHtml(end)}</small></td>
+      <td class="col-num">${c.days != null ? c.days : "—"}</td>
+      <td class="col-num">${fmtDuration(c.awake_sec)}</td>
+      <td class="col-num">${fmtDuration(c.sleeping_sec)}</td>
+      <td class="col-num">${c.discharge_pct}%</td>
+      <td class="col-num">${escapeHtml(charged)}</td>
+      <td class="col-num">${c.per_day_pct != null ? `${c.per_day_pct}%/天` : "—"}</td>
+    </tr>`;
+  }).join("");
+}
+
+function showChartPlaceholder(id, text) {
+  const inst = state.charts[id];
+  if (inst) {
+    inst.dispose();
+    delete state.charts[id];
+  }
+  const el = document.getElementById(id);
+  el.classList.add("chart-pending");
+  el.textContent = text;
+}
+
+function paintBatteryCharts(cyc, daily) {
+  const cycles = (cyc && cyc.cycles || []).slice().reverse();   // 旧 → 新
+  if (!cycles.length) {
+    $("#batChartsRow").hidden = true;
+    return;
+  }
+  $("#batChartsRow").hidden = false;
+  const p = palette();
+
+  if (cycles.length < 2) {
+    showChartPlaceholder("batCycleChart", "数据积累中：跨过一次充电周期后开始出图");
+  } else {
+    const labels = cycles.map((c, i) => `周期${i + 1}·${fmtDate(c.start_ts)}`);
+    const chartEl = document.getElementById("batCycleChart");
+    chartEl.classList.remove("chart-pending");
+    chartEl.textContent = "";
+
+    chartOf("batCycleChart", {
+    grid: { left: 40, right: 42, top: 28, bottom: 36 },
+    tooltip: { trigger: "axis" },
+    legend: { top: 0, textStyle: { color: p.muted }, itemWidth: 12, itemHeight: 8 },
+    xAxis: {
+      type: "category",
+      data: labels,
+      axisLabel: { color: p.muted, fontSize: 10, interval: 0, rotate: labels.length > 4 ? 30 : 0 },
+      axisLine: { lineStyle: { color: p.border } },
+    },
+    yAxis: [
+      { type: "value", name: "天", nameTextStyle: { color: p.muted },
+        axisLabel: { color: p.muted }, splitLine: { lineStyle: { color: p.border } } },
+      { type: "value", name: "清醒小时", nameTextStyle: { color: p.muted },
+        axisLabel: { color: p.muted }, splitLine: { show: false } },
+    ],
+    series: [
+      {
+        name: "天/次充电", type: "line", data: cycles.map((c) => c.days),
+        smooth: true, symbolSize: 6,
+        itemStyle: { color: p.accent }, lineStyle: { width: 2 },
+      },
+      {
+        name: "清醒小时", type: "bar", yAxisIndex: 1,
+        data: cycles.map((c) => Math.round(c.awake_sec / 36) / 100),
+        itemStyle: { color: p.soft, borderRadius: [3, 3, 0, 0] },
+        barMaxWidth: 26,
+      },
+    ],
+    });
+  }
+
+  const days = (daily && daily.days) || [];
+  if (!days.length || daily.note) {
+    showChartPlaceholder("batDailyChart", daily.note || "样本不足");
+  } else {
+    $("#batDailyHint").textContent = "按采样时刻分摊 · 估算值";
+    const chart = document.getElementById("batDailyChart");
+    chart.classList.remove("chart-pending");
+    chart.textContent = "";
+    chartOf("batDailyChart", {
+      grid: { left: 36, right: 16, top: 24, bottom: 40 },
+      tooltip: {
+        trigger: "axis",
+        formatter: (items) => {
+          const it = items[0];
+          return `${it.name}<br>净耗电 ${it.value}%（放电为正）`;
+        },
+      },
+      xAxis: {
+        type: "category",
+        data: days.map((d) => d.date.slice(5)),
+        axisLabel: { color: p.muted, fontSize: 10, rotate: days.length > 16 ? 40 : 0 },
+        axisLine: { lineStyle: { color: p.border } },
+      },
+      yAxis: {
+        type: "value",
+        axisLabel: { color: p.muted },
+        splitLine: { lineStyle: { color: p.border } },
+      },
+      series: [{
+        name: "日净耗电%", type: "bar", data: days.map((d) => d.net_pct),
+        itemStyle: {
+          color: (params) => (params.value < 0 ? p.soft : p.accent),
+          borderRadius: [3, 3, 0, 0],
+        },
+        barMaxWidth: 14,
+      }],
+    });
+  }
+}
+
 /* ---------- 设备 ---------- */
 
 async function loadStatus(force = false) {
@@ -1780,6 +2071,9 @@ async function loadStatus(force = false) {
     setOnline(true, s.host);
     paintStatus(s);
     $("#pageSub").textContent = `已连接 ${s.host}`;
+    // 既然已经连上设备，顺手采一条电池（120 秒节流在后端兜底）。
+    // 静默失败：设备页不该因为电池插件缺失而报错
+    sampleBattery(true);
   } catch (err) {
     $("#pageSub").textContent = "设备未连接";
     setOnline(false, state.host);
@@ -1954,6 +2248,10 @@ function bindEvents() {
   $("#btnMkdir").onclick = newFolder;
   $("#btnSaveHost").onclick = saveHost;
   $("#btnScan").onclick = scanDevices;
+
+  $("#btnBatSync").onclick = () => sampleBattery(false);
+  $("#btnBatEmptySync").onclick = () => sampleBattery(false);
+  $("#btnBatteryJump").onclick = () => go("battery");
 
   const onRange = (e) => {
     const btn = e.target.closest("button");

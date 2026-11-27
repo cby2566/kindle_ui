@@ -31,6 +31,10 @@
         <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M7.5 5.5H17M7.5 10H17M7.5 14.5H17"/><path d="M3.5 5.5h.01M3.5 10h.01M3.5 14.5h.01"/></svg>
         <span>阅读记录</span>
       </button>
+      <button class="nav-item" data-view="battery">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="6.5" width="12.5" height="7" rx="1.5"/><path d="M17 9v2"/><path d="M5.5 8.5h4v3h-4z" fill="currentColor" stroke="none"/></svg>
+        <span>电池</span>
+      </button>
       <button class="nav-item" data-view="library" id="navLibrary">
         <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 5.5h5l1.5 2H17v8.5H3z"/></svg>
         <span>书库</span>
@@ -266,6 +270,96 @@
       </div>
     </section>
 
+    <section class="view" id="view-battery">
+      <div class="card">
+        <div class="batt-status">
+          <div class="gauge">
+            <div class="gauge-ring" id="batRing"><span id="batPct">—</span></div>
+            <div class="gauge-meta">
+              <b id="batLabel">—</b>
+              <span id="batHint">—</span>
+              <span id="batSyncAt">—</span>
+            </div>
+          </div>
+          <div class="batt-facts" id="batFacts"></div>
+          <button class="btn btn-primary" id="btnBatSync">立即同步</button>
+        </div>
+      </div>
+
+      <div class="card" id="batCompareCard" hidden>
+        <div class="card-head">
+          <h2>清醒 vs 睡眠</h2>
+          <span class="card-hint" id="batRatioHint">—</span>
+        </div>
+        <div class="bat-compare">
+          <div class="bat-cell">
+            <span class="kpi-label">清醒耗电</span>
+            <b class="kpi-value" id="batAwakeRate">—</b>
+            <span class="kpi-foot" id="batAwakeFoot">—</span>
+          </div>
+          <div class="bat-cell">
+            <span class="kpi-label">睡眠耗电</span>
+            <b class="kpi-value" id="batSleepingRate">—</b>
+            <span class="kpi-foot" id="batSleepFoot">—</span>
+          </div>
+          <div class="bat-cell bat-cell-accent">
+            <span class="kpi-label">相差</span>
+            <b class="kpi-value" id="batRatio">—</b>
+            <span class="kpi-foot">清醒时每一小时，抵得睡眠里多少小时</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="card" id="batCyclesCard" hidden>
+        <div class="card-head">
+          <h2>充电周期</h2>
+          <span class="card-hint">起止按采样时刻估算</span>
+        </div>
+        <div class="table-wrap">
+          <table class="table" id="batCyclesTable">
+            <thead>
+              <tr>
+                <th class="col-rank">#</th>
+                <th>起止（约）</th>
+                <th class="col-num">天数</th>
+                <th class="col-num">清醒</th>
+                <th class="col-num">睡眠</th>
+                <th class="col-num">耗电</th>
+                <th class="col-num">充电补回</th>
+                <th class="col-num">日均</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <p class="tip">† 周期终点由下一次采样发现电量计数重置推断，实际结束在最后一次采样与充电之间</p>
+      </div>
+
+      <div class="grid-2" id="batChartsRow" hidden>
+        <div class="card">
+          <div class="card-head">
+            <h2>周期趋势</h2>
+            <span class="card-hint">柱 = 清醒小时 · 线 = 天/次充电</span>
+          </div>
+          <div class="chart" id="batCycleChart"></div>
+        </div>
+        <div class="card">
+          <div class="card-head">
+            <h2>日净耗电</h2>
+            <span class="card-hint" id="batDailyHint">按采样时刻分摊 · 估算</span>
+          </div>
+          <div class="chart" id="batDailyChart"></div>
+        </div>
+      </div>
+
+      <div class="empty" id="batEmpty" hidden>
+        还没有电池数据。同步一次，之后每次打开面板都会自动补一条记录（间隔 2 小时左右才会真正变化）。
+        <div style="margin-top:14px">
+          <button class="btn btn-primary" id="btnBatEmptySync">立即同步</button>
+        </div>
+      </div>
+    </section>
+
     <section class="view" id="view-library">
       <div class="card card-flush">
         <div class="lib-toolbar">
@@ -292,7 +386,12 @@
     <section class="view" id="view-device">
       <div class="grid-2">
         <div class="card">
-          <div class="card-head"><h2>电池</h2><span class="card-hint" id="battState">—</span></div>
+          <div class="card-head"><h2>电池</h2>
+            <div class="batt-card-actions">
+              <span class="card-hint" id="battState">—</span>
+              <button class="btn btn-mini" id="btnBatteryJump" title="查看按充电周期组织的完整电池统计">查看电池统计</button>
+            </div>
+          </div>
           <div class="gauge">
             <div class="gauge-ring" id="battRing"><span id="battPct">—</span></div>
             <div class="gauge-meta">
