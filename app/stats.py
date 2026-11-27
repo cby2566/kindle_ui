@@ -114,12 +114,21 @@ class StatsCache:
         self.local = False          # 本地模式：只读缓存，完全不碰设备
         self.source = "cache"       # device = 本次真的连上设备拿了新库
         self.last_error = None
-        self.refreshing = False     # 此刻有请求正在拉库
         self.db_error = None        # 缓存库本身读不出来（本地文件损坏）
 
     @property
     def part_path(self):
         return Path(str(self.db_path) + ".part")
+
+    @property
+    def refreshing(self):
+        """此刻是否有请求真的在拉库。
+
+        直接问那把锁，不再另外维护标志位：手工置位总要在拉库结束那一刻清掉，
+        等响应组装时早就变回 False 了（所以 /api/stats 里这个字段一直是假话）。
+        锁自己就能回答「现在有没有人占着」，也不怕并发请求互相改乱。
+        """
+        return self._fetch_lock.locked()
 
     def _file_mtime(self):
         try:
@@ -226,7 +235,12 @@ class StatsCache:
         return "device", False, None
 
     def _result(self, source, offline, cache_error, local=None):
-        """本次调用的结果快照（不读会被并发请求改写的 source/offline/local）。"""
+        """本次调用的结果快照（不读会被并发请求改写的 source/offline/local）。
+
+        这里不含 db_error：它是「读缓存库」的结论，归读接口自己带。
+        ensure() 先返回、snapshot() 后读，若在这里读上一次留下的值，
+        会盖掉本次读刚查出来的错误。
+        """
         return {
             "path": str(self.db_path),
             "source": source,
@@ -235,7 +249,6 @@ class StatsCache:
             "refreshing": self.refreshing,
             "cached_at": int(self.fetched_at) if self.fetched_at else None,
             "cache_error": cache_error,
-            "db_error": self.db_error,
         }
 
     def ensure(self, kindle, max_age=90, force=False, local=False):
@@ -248,7 +261,6 @@ class StatsCache:
         适用于「手头没有设备、只想翻历史」的场景，省掉每次都干等超时。
         """
         self.local = bool(local)
-        self.refreshing = False
         if local:
             if not self.has_cache():
                 raise DeviceError(
@@ -276,12 +288,12 @@ class StatsCache:
                 self.source = "cache"
                 self.last_error = None
                 self.fetched_at = self._file_mtime()
-                return self._result("cache", False, None)
-            self.refreshing = True
-            try:
-                source, offline, error = self._fetch(kindle)
-            finally:
-                self.refreshing = False
+                outcome = ("cache", False, None)
+            else:
+                outcome = self._fetch(kindle)
+        # 出了锁再组装响应：refreshing 问的是「此刻还有没有别人在拉库」，
+        # 停在锁里取会把自己也算进去。
+        source, offline, error = outcome
         return self._result(source, offline, error)
 
     def _connect(self):

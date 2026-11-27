@@ -82,6 +82,8 @@ def get_stats(range: str = "all", refresh: int = 0, local: int = 0):
     data = CACHE.snapshot(range)
     data["host"] = k.host
     data.update(state)
+    # db_error 以本次读为准：state 是读之前取的，里面若带旧值会盖掉刚查出来的错
+    data.setdefault("db_error", None)
     return data
 
 
