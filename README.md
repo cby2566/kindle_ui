@@ -35,8 +35,19 @@ python run.py --host 192.168.31.215
 | 阅读统计 | `koreader/settings/statistics.sqlite3` | 首次打开会 SFTP 拉一份到 `data/cache/`，之后 90 秒内复用缓存；五个子页：概览 / 周 / 日历 / 单日 / 书籍 |
 | 洞察 | 本地缓存的统计库 | 跟随时间范围（今天 / 本周 / 本月 / 今年 / 全部）给出小结、近 12 个月趋势、星期 × 时段热力图与几条自动总结的规律 |
 | 阅读记录 | 本地缓存的统计库 | 把翻页记录合成「一次阅读」（相邻两页间隔不超过 15 分钟），可按时间段、按书筛选，整份导出 CSV |
+| 电池 | `koreader/settings/battery_stats.lua` + sysfs | 按充电周期组织：状态条、清醒/睡眠耗电率对比、周期表、周期趋势（天/次充电）；每次进入自动补采一次（120 秒节流、指纹去重） |
 | 书库 | `/mnt/us` 文件树 | 浏览、上传（支持拖拽）、下载、删除、新建文件夹；本地模式下入口隐藏，由洞察与阅读记录补位 |
-| 设备 | SSH 读 `/proc`、`/sys` | 电量、存储、内存、固件、KOReader 版本、时钟偏差 |
+| 设备 | SSH 读 `/proc`、`/sys` | 电量、存储、内存、固件、KOReader 版本、时钟偏差；电池小环保留作摘要，可跳转完整电池页 |
+
+### 电池模块口径
+
+设计文档见 `docs/battery-module.md`，三个关键口径（均已在设备实测与源码复核）：
+
+- KOReader 的累计量单位是微秒、单调时钟（suspend 期不走），不当 Unix 时间用，绝对时间只以本机采样时刻锚定；
+- 插电会整组清零累计量，因此「相邻快照 discharging 下降」即周期边界，起止误差=采样间隔，界面一律写「约」；
+- 预计剩余/充满时间与 KOReader 菜单同公式（rate = 耗电% / 时长）。
+
+数据存自己的 `data/cache/battery.sqlite3`（只增不改，与统计库缓存互不干扰）；temp/电流/循环次数等量纲未标定的字段照抓照存但不展示。本地模式下电池页只读历史，不产生任何设备连接。
 
 ### 离线可用
 
@@ -68,10 +79,12 @@ python run.py --host 192.168.31.215
 app/config.py    本地配置持久化（设备地址、端口）
 app/device.py    SSH/SFTP 封装、设备状态采集、局域网 IP 扫描
 app/stats.py     统计库解析 → 前端可直接绘图的结构
+app/battery.py   电池周期统计（解析 batterystat 插件累计量、周期重建、采样节流去重）
 app/server.py    REST 接口与静态资源
 web/             前端（index.html / app.js / style.css）
 web/vendor/      离线内置的第三方库：echarts 5.5.1、vis-timeline 7.7.3
 run.py           启动入口
+tests/           单元测试：py -m unittest discover tests
 ```
 
 ## 前端依赖
