@@ -30,6 +30,13 @@ const state = {
   timeline: null,          // vis.Timeline 实例
   colors: new Map(),       // book_id -> 调色板序号 1..8
   colorSeq: 0,
+  // 洞察 / 阅读记录两页的数据与筛选状态
+  insights: null,
+  sessions: null,
+  sessionRows: [],
+  sessionShown: 0,
+  sessionPeriod: "7d",
+  sessionBook: "",
   loaded: { stats: false, library: false, device: false },
 };
 
@@ -158,6 +165,8 @@ function palette() {
     border: read("--border"),
     panel: read("--panel"),
     soft: dark ? "#2a3f39" : "#a9d8c8",
+    // 热力图里「没读过」的格子：比 soft 更淡，压在底色上像一张空格子纸
+    heatLow: dark ? "#1e332e" : "#eef4f1",
   };
 }
 
@@ -175,6 +184,7 @@ function disposeCharts() {
   Object.values(state.charts).forEach((c) => c.dispose());
   state.charts = {};
   if (state.loaded.stats && state.stats) paintStats();
+  if (state.view === "insights" && state.insights) paintInsights(state.insights);
 }
 
 window.addEventListener("resize", () => {
@@ -194,9 +204,13 @@ window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", dis
 
 const VIEW_META = {
   stats: { title: "阅读统计", sub: "来自设备上的 KOReader 阅读记录" },
+  insights: { title: "洞察", sub: "规律与节奏" },
+  records: { title: "阅读记录", sub: "按「一次阅读」列出" },
   library: { title: "书库", sub: "/mnt/us/documents" },
   device: { title: "设备", sub: "连接状态与系统信息" },
 };
+/* 没有子页、地址栏只写 #名字 的视图 */
+const SIMPLE_VIEWS = ["library", "device", "insights", "records"];
 
 function buildHash(view, sub, arg) {
   if (view !== "stats") return `#${view}`;
@@ -207,7 +221,7 @@ function parseHash() {
   const raw = (location.hash || "").replace(/^#\/?/, "");
   if (!raw) return { view: "stats", sub: "overview", arg: null };
   const parts = raw.split("/").filter(Boolean);
-  const view = parts[0] === "library" || parts[0] === "device" ? parts[0] : "stats";
+  const view = SIMPLE_VIEWS.includes(parts[0]) ? parts[0] : "stats";
   if (view !== "stats") return { view, sub: null, arg: null };
   const sub = SUBS.includes(parts[1]) ? parts[1] : "overview";
   return { view: "stats", sub, arg: parts[2] || null };
@@ -215,6 +229,8 @@ function parseHash() {
 
 /** 唯一的路由入口：落地状态、刷新标题、同步地址栏。 */
 function go(view, sub, arg) {
+  // 本地模式下书库不可用：这块位置由洞察顶上
+  if (view === "library" && state.local) view = "insights";
   applyView(view);
   if (view === "stats") applySub(sub || "overview", arg || null);
   const hash = buildHash(view, view === "stats" ? (sub || "overview") : null,
@@ -226,6 +242,12 @@ function go(view, sub, arg) {
 }
 
 function applyView(view) {
+  // 本地模式下书库不可用：地址栏直接写 #library 时改道去洞察
+  if (view === "library" && state.local) {
+    toast("本地模式下不浏览书库，已切到洞察");
+    go("insights");
+    return;
+  }
   state.view = view;
   $$(".nav-item").forEach((b) => b.classList.toggle("is-active", b.dataset.view === view));
   $$(".view").forEach((v) => v.classList.toggle("is-active", v.id === `view-${view}`));
@@ -238,11 +260,7 @@ function applyView(view) {
   paintActions();
 
   if (view === "library") {
-    if (state.local) {
-      toast("本地模式下不浏览书库，关掉开关即可连接设备");
-    } else if (!state.loaded.library) {
-      loadFiles(state.path);
-    }
+    if (!state.loaded.library) loadFiles(state.path);
   }
   if (view === "device") {
     if (state.local) {
@@ -250,6 +268,16 @@ function applyView(view) {
     } else {
       loadStatus();
     }
+  }
+  // 洞察与阅读记录只读缓存。与日历、单日同一套路：
+  // 缓存还没确认过就先走一遍 /api/stats（联网时顺带拉一次新库），再取本页数据
+  if (view === "insights") {
+    if (!state.loaded.stats) loadStats().then(loadInsights);
+    else loadInsights();
+  }
+  if (view === "records") {
+    if (!state.loaded.stats) loadStats().then(loadSessions);
+    else loadSessions();
   }
 }
 
@@ -322,6 +350,10 @@ function paintActions() {
     } else {
       box.appendChild(button("刷新数据", "btn btn-primary", () => loadStats(true)));
     }
+  } else if (state.view === "insights") {
+    box.appendChild(button("刷新数据", "btn btn-primary", () => loadInsights()));
+  } else if (state.view === "records") {
+    box.appendChild(button("刷新", "btn", () => loadSessions()));
   } else if (state.view === "library") {
     box.appendChild(button("刷新", "btn", () => loadFiles(state.path)));
   } else if (state.view === "device") {
@@ -400,6 +432,8 @@ function applyLocalMode(on) {
   localStorage.setItem("kwp.localMode", on ? "1" : "0");
   $("#localRow").setAttribute("aria-pressed", on ? "true" : "false");
   $("#localRow").classList.toggle("is-on", on);
+  // 书库要连设备，本地模式下把入口藏起来，位置留给洞察与阅读记录
+  $("#navLibrary").hidden = on;
 
   state.online = null;
   state.cacheOffline = false;
@@ -417,6 +451,11 @@ function applyLocalMode(on) {
 
 /** 切换模式后把当前这一页按新口径重新取一遍。 */
 function reloadCurrent(force = true) {
+  if (state.local && state.view === "library") {
+    // 刚开本地模式时人还在书库：领去顶替它的洞察页，go 里已经取好数
+    go("insights");
+    return;
+  }
   if (state.view === "stats") {
     if (state.sub === "overview" || state.sub === "books") {
       loadStats(force);
@@ -427,6 +466,10 @@ function reloadCurrent(force = true) {
     } else if (state.sub === "day") {
       loadDay(state.selectedDate);
     }
+  } else if (state.view === "insights") {
+    loadInsights();
+  } else if (state.view === "records") {
+    loadSessions();
   } else if (state.view === "device" && !state.local) {
     loadStatus(true);
   } else if (state.view === "library" && !state.local) {
@@ -1139,6 +1182,311 @@ function paintTimeline(day) {
   wrap.appendChild(foot);
 }
 
+/* ---------- 洞察 ---------- */
+
+const PREV_NAME = { today: "昨天", week: "上周", month: "上月", year: "去年" };
+
+/** 时间范围是概览与洞察共用的：一处切换，两处的高亮一起动。 */
+function setRange(range) {
+  state.range = range;
+  paintRange();
+  if (state.view === "stats") {
+    if (state.sub === "overview" || state.sub === "books") loadStats();
+  } else if (state.view === "insights") {
+    loadInsights();
+  }
+}
+
+function paintRange() {
+  ["#rangeSeg", "#insRangeSeg"].forEach((sel) => {
+    $$(sel + " button").forEach((b) => b.classList.toggle("is-on", b.dataset.range === state.range));
+  });
+}
+
+async function loadInsights() {
+  try {
+    const data = await api(`/api/stats/insights?range=${state.range}`);
+    state.insights = data;
+    syncOfflineState(data);
+    paintInsights(data);
+    setTimeout(() => {
+      ["monthChart", "heatChart"].forEach((id) => {
+        if (state.charts[id]) state.charts[id].resize();
+      });
+    }, 30);
+  } catch (err) {
+    toast(err.message, "err");
+  }
+}
+
+/* 一次阅读可能只有几秒钟，按分钟四舍五入会变成「0 分钟」 */
+function fmtMinutes(seconds) {
+  if (seconds > 0 && seconds < 30) return "不到 1 分钟";
+  return fmtDuration(seconds);
+}
+
+function paintInsights(d) {
+  const o = d.overview;
+  if (state.view === "insights") {
+    $("#pageSub").textContent = state.cacheOffline
+      ? `洞察${offlineSuffix()}`
+      : "规律与节奏 · 间隔不超过 15 分钟的翻页算同一次阅读";
+  }
+
+  $("#insTotalLabel").textContent = RANGE_TITLE[d.range] || "阅读时长";
+  $("#insTotal").textContent = fmtDuration(o.seconds);
+  let foot = o.seconds ? `${o.active_days} 个阅读日 · ${o.books} 本书` : "这个范围没有阅读记录";
+  if (o.delta_pct != null) {
+    foot += ` · 较${PREV_NAME[d.range]} ${o.delta_pct >= 0 ? "+" : ""}${o.delta_pct}%`;
+  }
+  $("#insTotalFoot").textContent = foot;
+
+  $("#insAvg").textContent = o.session_count ? fmtMinutes(o.avg_session_seconds) : "—";
+  $("#insAvgFoot").textContent = o.session_count ? `共 ${o.session_count} 次阅读` : "—";
+
+  const lg = o.longest;
+  $("#insLongest").textContent = lg ? fmtDuration(lg.seconds) : "—";
+  $("#insLongestFoot").textContent = lg
+    ? `${fmtMD(lg.date)} ${lg.start} – ${lg.end} · ${lg.books > 1 ? `${lg.books} 本书` : lg.title}`
+    : "—";
+
+  $("#insRangeHint").textContent = d.range_start ? `${d.range_start} 至今` : "有记录以来";
+  $("#factsHint").textContent = o.speed ? `平均速度 ${o.speed} 页 / 小时` : "";
+
+  paintMonthChart(d.monthly);
+  paintHeatChart(d.heatmap);
+  paintFacts(d.facts);
+}
+
+function paintMonthChart(monthly) {
+  const p = palette();
+  chartOf("monthChart", {
+    backgroundColor: "transparent",
+    grid: { left: 56, right: 12, top: 20, bottom: 28 },
+    tooltip: {
+      trigger: "axis",
+      formatter: (ps) => {
+        const m = monthly[ps[0].dataIndex];
+        return `${m.month}<br/>${
+          m.seconds ? `${fmtDuration(m.seconds)} · ${m.days} 个阅读日` : "没有阅读记录"}`;
+      },
+      backgroundColor: p.panel,
+      borderColor: p.border,
+      textStyle: { color: p.text, fontSize: 12 },
+    },
+    xAxis: {
+      type: "category",
+      data: monthly.map((m) => `${Number(m.month.slice(5))}月`),
+      axisLine: { lineStyle: { color: p.border } },
+      axisTick: { show: false },
+      axisLabel: { color: p.muted, fontSize: 11 },
+    },
+    yAxis: {
+      type: "value",
+      splitLine: { lineStyle: { color: p.border } },
+      axisLabel: { color: p.muted, fontSize: 11, formatter: (v) => (v ? `${v} 小时` : "0") },
+    },
+    series: [{
+      type: "bar",
+      barMaxWidth: 18,
+      data: monthly.map((m) => ({
+        value: +(m.seconds / 3600).toFixed(2),
+        itemStyle: {
+          color: m.in_range ? p.accent : p.soft,
+          borderRadius: [3, 3, 0, 0],
+        },
+      })),
+    }],
+  });
+}
+
+function paintHeatChart(heat) {
+  const p = palette();
+  const pad = (n) => String(n).padStart(2, "0");
+  chartOf("heatChart", {
+    backgroundColor: "transparent",
+    grid: { left: 46, right: 12, top: 10, bottom: 28 },
+    tooltip: {
+      formatter: (ps) => {
+        const [hour, weekday, minutes] = ps.data;
+        return `${WEEK_FULL[weekday]} ${pad(hour)} 点<br/>${minutes ? `${minutes} 分钟` : "没有阅读"}`;
+      },
+      backgroundColor: p.panel,
+      borderColor: p.border,
+      textStyle: { color: p.text, fontSize: 12 },
+    },
+    xAxis: {
+      type: "category",
+      data: Array.from({ length: 24 }, (_, h) => pad(h)),
+      axisLine: { show: false },
+      axisTick: { show: false },
+      axisLabel: { color: p.muted, fontSize: 11, interval: 2 },
+    },
+    yAxis: {
+      type: "category",
+      data: WEEK_FULL,
+      axisLine: { show: false },
+      axisTick: { show: false },
+      axisLabel: { color: p.muted, fontSize: 11 },
+    },
+    visualMap: {
+      show: false,
+      min: 0,
+      max: Math.max(1, heat.max_minutes),
+      inRange: { color: [p.heatLow, p.soft, p.accent] },
+    },
+    series: [{
+      type: "heatmap",
+      data: heat.data,
+      itemStyle: { borderColor: p.panel, borderWidth: 2, borderRadius: 3 },
+      emphasis: { itemStyle: { borderColor: p.text, borderWidth: 1.5 } },
+    }],
+  });
+}
+
+function paintFacts(facts) {
+  const box = $("#factsList");
+  box.innerHTML = "";
+  if (!facts.length) {
+    box.innerHTML = '<div class="empty">这个范围还没有可总结的规律</div>';
+    return;
+  }
+  facts.forEach((f) => {
+    let value = "";
+    let note = "";
+    if (f.kind === "window") {
+      value = f.start === f.end
+        ? `${f.start} 点这一小时`
+        : `${f.start} 点到 ${f.end < f.start ? "次日 " : ""}${f.end} 点`;
+      note = `这 ${f.hours} 个小时占了 ${f.share}% 的阅读`;
+    } else if (f.kind === "peak") {
+      value = `${f.hour} 点这一小时`;
+      note = `占 ${f.share}% 的阅读`;
+    } else if (f.kind === "weekdays") {
+      value = f.weekdays.map((w) => WEEK_FULL[w]).join("、");
+      note = `${f.weekdays.length > 1 ? "合计占" : "占"} ${f.share}%`;
+    } else if (f.kind === "speed_day") {
+      value = `${fmtMD(f.date)} · ${f.speed} 页 / 小时`;
+      note = `那天读了 ${fmtDuration(f.seconds)} · ${f.records} 页`;
+    } else if (f.kind === "none") {
+      value = "数据不足";
+      note = f.note;
+    } else if (f.kind === "top_book") {
+      value = f.title;
+      note = `占 ${f.share}% · ${fmtDuration(f.seconds)}`;
+    }
+    const row = document.createElement("div");
+    row.className = "fact";
+    row.innerHTML = `<span class="fact-label">${escapeHtml(f.label)}</span>
+      <span class="fact-body"><b>${escapeHtml(value)}</b><span>${escapeHtml(note)}</span></span>`;
+    box.appendChild(row);
+  });
+}
+
+/* ---------- 阅读记录 ---------- */
+
+const SESSION_PAGE = 100;    // 清单每次显示的条数，列表接口一次最多给 500 条
+
+function sessionsQuery() {
+  const q = new URLSearchParams({ period: state.sessionPeriod });
+  if (state.sessionBook) q.set("book", state.sessionBook);
+  return q;
+}
+
+async function loadSessions() {
+  try {
+    const data = await api(`/api/stats/sessions?${sessionsQuery().toString()}`);
+    state.sessions = data;
+    syncOfflineState(data);
+    state.sessionRows = data.sessions;
+    state.sessionShown = Math.min(SESSION_PAGE, data.sessions.length);
+    paintBookOptions(data.books);
+    paintSessions();
+  } catch (err) {
+    toast(err.message, "err");
+  }
+}
+
+function paintBookOptions(books) {
+  const sel = $("#recBook");
+  sel.innerHTML = "";
+  const all = document.createElement("option");
+  all.value = "";
+  all.textContent = "全部书籍";
+  sel.appendChild(all);
+  books.forEach((b) => {
+    const opt = document.createElement("option");
+    opt.value = String(b.id);
+    opt.textContent = b.title;
+    sel.appendChild(opt);
+  });
+  sel.value = state.sessionBook;
+  if (sel.value !== state.sessionBook) {
+    // 正选着的书不在可选范围里：退回全部书籍
+    state.sessionBook = "";
+    sel.value = "";
+  }
+}
+
+function sessionRow(s) {
+  const row = document.createElement("div");
+  row.className = "sess-row";
+  row.tabIndex = 0;
+  const day = parseDate(s.date).getDay();
+  const single = s.books.length === 1;
+  const name = single ? s.books[0].title : `${s.books[0].title} 等 ${s.books.length} 本`;
+  const swatch = single
+    ? `<i class="swatch" style="background:${bookColor(s.books[0].id)}"></i>`
+    : "";
+  row.innerHTML = `<span class="sess-date">${fmtMD(s.date)}<em>${WEEK_FULL[(day + 6) % 7]}</em></span>
+    <span class="sess-time">${s.start_time} – ${s.end_time}</span>
+    <span class="sess-book">${swatch}<span title="${escapeHtml(name)}">${escapeHtml(name)}</span></span>
+    <span class="sess-dur">${fmtMinutes(s.seconds)}</span>
+    <span class="sess-pages">${s.records.toLocaleString("zh-CN")} 页</span>`;
+  row.onclick = () => openDay(s.date);
+  row.onkeydown = (e) => {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      openDay(s.date);
+    }
+  };
+  return row;
+}
+
+function paintSessions() {
+  const data = state.sessions;
+  const rows = state.sessionRows;
+  const box = $("#recList");
+  box.innerHTML = "";
+  if (state.view === "records") {
+    $("#pageSub").textContent = data.total
+      ? `共 ${data.total} 次阅读 · ${fmtDuration(data.seconds)} · ${data.records.toLocaleString("zh-CN")} 页`
+      : "这个范围没有阅读记录";
+  }
+  if (!rows.length) {
+    box.innerHTML = '<div class="empty">这个范围没有阅读记录</div>';
+  } else {
+    rows.slice(0, state.sessionShown).forEach((s) => box.appendChild(sessionRow(s)));
+  }
+  const rest = rows.length - state.sessionShown;
+  $("#recMore").hidden = rest <= 0;
+  $("#recMore").textContent = `再显示 ${Math.max(0, Math.min(SESSION_PAGE, rest))} 条`;
+  $("#recMoreHint").textContent = data.truncated
+    ? `只列出最近的 ${rows.length} 次，更早的请缩小范围或按书筛选`
+    : "";
+}
+
+/** 清单由后端整份生成 CSV，不受列表的条数上限影响。 */
+function exportSessions() {
+  const a = document.createElement("a");
+  a.href = `/api/stats/sessions/export?${sessionsQuery().toString()}`;
+  a.download = "";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  toast("已开始导出 CSV", "ok");
+}
+
 /* ---------- 书库 ---------- */
 
 async function loadFiles(path) {
@@ -1499,13 +1847,27 @@ function bindEvents() {
   $("#btnSaveHost").onclick = saveHost;
   $("#btnScan").onclick = scanDevices;
 
-  $("#rangeSeg").onclick = (e) => {
+  const onRange = (e) => {
     const btn = e.target.closest("button");
     if (!btn) return;
-    state.range = btn.dataset.range;
-    $$("#rangeSeg button").forEach((b) => b.classList.toggle("is-on", b === btn));
-    loadStats();
+    setRange(btn.dataset.range);
   };
+  $("#rangeSeg").onclick = onRange;
+  $("#insRangeSeg").onclick = onRange;
+
+  $("#recPeriod").onchange = (e) => {
+    state.sessionPeriod = e.target.value;
+    loadSessions();
+  };
+  $("#recBook").onchange = (e) => {
+    state.sessionBook = e.target.value;
+    loadSessions();
+  };
+  $("#recMore").onclick = () => {
+    state.sessionShown += SESSION_PAGE;
+    paintSessions();
+  };
+  $("#recExport").onclick = exportSessions;
 
   $("#statsTabs").onclick = (e) => {
     const btn = e.target.closest("button");
@@ -1615,6 +1977,8 @@ async function boot() {
   $("#chipSub").textContent = "检测中…";
   $("#localRow").setAttribute("aria-pressed", state.local ? "true" : "false");
   $("#localRow").classList.toggle("is-on", state.local);
+  $("#navLibrary").hidden = state.local;
+  paintRange();
 
   if (state.local) {
     // 本地模式启动：不探活、不拉状态，直接读缓存

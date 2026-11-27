@@ -21,7 +21,16 @@
         <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 16V9m4.5 7V4m4.5 12v-5m4.5 5V7"/></svg>
         <span>阅读统计</span>
       </button>
-      <button class="nav-item" data-view="library">
+      <!-- 书库排在洞察、阅读记录之后：本地模式隐藏它时，其余入口的位置不动 -->
+      <button class="nav-item" data-view="insights">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M7.6 13.4a5 5 0 1 1 4.8 0l-.4 2.1H8z"/><path d="M8.5 17.5h3"/></svg>
+        <span>洞察</span>
+      </button>
+      <button class="nav-item" data-view="records">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M7.5 5.5H17M7.5 10H17M7.5 14.5H17"/><path d="M3.5 5.5h.01M3.5 10h.01M3.5 14.5h.01"/></svg>
+        <span>阅读记录</span>
+      </button>
+      <button class="nav-item" data-view="library" id="navLibrary">
         <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 5.5h5l1.5 2H17v8.5H3z"/></svg>
         <span>书库</span>
       </button>
@@ -325,6 +334,92 @@
         </div>
         <div class="scan-result" id="scanResult"></div>
       </div>
+    </section>
+
+    <section class="view" id="view-insights">
+      <div class="range-bar" id="insRangeBar">
+        <div class="seg" id="insRangeSeg">
+          <button data-range="today">今天</button>
+          <button data-range="week">本周</button>
+          <button data-range="month">本月</button>
+          <button data-range="year">今年</button>
+          <button data-range="all" class="is-on">全部</button>
+        </div>
+        <span class="range-hint" id="insRangeHint">—</span>
+      </div>
+
+      <div class="kpis kpis-3">
+        <div class="kpi">
+          <span class="kpi-label" id="insTotalLabel">阅读时长</span>
+          <b class="kpi-value" id="insTotal">—</b>
+          <span class="kpi-foot" id="insTotalFoot">—</span>
+        </div>
+        <div class="kpi">
+          <span class="kpi-label">平均一次</span>
+          <b class="kpi-value" id="insAvg">—</b>
+          <span class="kpi-foot" id="insAvgFoot">—</span>
+        </div>
+        <div class="kpi">
+          <span class="kpi-label">单次最长</span>
+          <b class="kpi-value" id="insLongest">—</b>
+          <span class="kpi-foot" id="insLongestFoot">—</span>
+        </div>
+      </div>
+
+      <div class="grid-2">
+        <div class="card">
+          <div class="card-head">
+            <h2>月度趋势</h2>
+            <span class="card-hint">近 12 个月 · 深色 = 当前范围内</span>
+          </div>
+          <div class="chart" id="monthChart"></div>
+        </div>
+        <div class="card">
+          <div class="card-head">
+            <h2>星期 × 时段</h2>
+            <span class="card-hint">颜色越深读得越多 · 分钟</span>
+          </div>
+          <div class="chart" id="heatChart"></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <h2>规律</h2>
+          <span class="card-hint" id="factsHint">—</span>
+        </div>
+        <div class="facts" id="factsList"></div>
+      </div>
+    </section>
+
+    <section class="view" id="view-records">
+      <div class="card">
+        <div class="card-head">
+          <h2>一次阅读的清单</h2>
+          <div class="rec-filters">
+            <select id="recPeriod" class="select" aria-label="时间段">
+              <option value="today">今天</option>
+              <option value="7d" selected>近 7 天</option>
+              <option value="30d">近 30 天</option>
+              <option value="month">本月</option>
+              <option value="all">全部</option>
+            </select>
+            <select id="recBook" class="select" aria-label="按书筛选">
+              <option value="">全部书籍</option>
+            </select>
+            <button class="btn" id="recExport">导出 CSV</button>
+          </div>
+        </div>
+        <div class="sess-head">
+          <span>日期</span><span>时间</span><span>书</span><span class="is-num">时长</span><span class="is-num">页数</span>
+        </div>
+        <div class="rec-list" id="recList"></div>
+        <div class="rec-more">
+          <button class="btn" id="recMore" hidden>再显示</button>
+          <span class="card-hint" id="recMoreHint"></span>
+        </div>
+      </div>
+      <p class="tip">相邻两页间隔不超过 15 分钟就算同一次阅读 · 点某一行看那天的时间轴</p>
     </section>
   </main>
 </div>

@@ -1324,3 +1324,97 @@ button, input { font: inherit; color: inherit; }
 }
 
 .banner.info .btn { color: var(--accent-text); border-color: var(--accent); }
+
+/* ---------- 洞察 ---------- */
+
+.kpis-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+
+.facts { display: flex; flex-direction: column; }
+
+.fact {
+  display: grid;
+  grid-template-columns: 140px minmax(0, 1fr);
+  gap: 12px;
+  align-items: baseline;
+  padding: 10px 6px;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+}
+
+.fact:last-child { border-bottom: 0; }
+
+.fact-label { color: var(--muted); }
+
+.fact-body { min-width: 0; }
+
+.fact-body b { font-weight: 500; }
+
+.fact-body span { margin-left: 10px; color: var(--muted); font-size: 12px; }
+
+/* ---------- 阅读记录 ---------- */
+
+.rec-filters { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+.select {
+  max-width: 220px;
+  padding: 6px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  outline: none;
+}
+
+.select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+
+.sess-head,
+.sess-row {
+  display: grid;
+  grid-template-columns: 104px 116px minmax(0, 1fr) 88px 68px;
+  gap: 12px;
+  align-items: center;
+  padding: 9px 6px;
+}
+
+.sess-head {
+  font-size: 12px;
+  color: var(--muted);
+  border-bottom: 1px solid var(--border);
+}
+
+.sess-row {
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+  cursor: pointer;
+  transition: background .12s;
+}
+
+.sess-row:last-child { border-bottom: 0; }
+
+.sess-row:hover { background: var(--panel-2); }
+
+.sess-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+.is-num, .sess-dur, .sess-pages { text-align: right; font-variant-numeric: tabular-nums; }
+
+.sess-date em { font-style: normal; margin-left: 5px; color: var(--muted); font-size: 12px; }
+
+.sess-time { color: var(--muted); font-variant-numeric: tabular-nums; }
+
+.sess-book { display: flex; align-items: center; gap: 8px; min-width: 0; }
+
+.sess-book span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.rec-more { display: flex; align-items: center; justify-content: center; gap: 12px; padding-top: 12px; }
+
+@media (max-width: 1080px) {
+  .kpis-3 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (max-width: 900px) {
+  .fact { grid-template-columns: 108px minmax(0, 1fr); }
+  .sess-head, .sess-row { grid-template-columns: 96px 108px minmax(0, 1fr) 80px; }
+  .sess-head .is-num:last-child, .sess-pages { display: none; }
+}
