@@ -19,6 +19,8 @@ const state = {
   day: null,
   status: null,
   online: null,
+  cacheOffline: false,
+  cachedAt: null,
   charts: {},
   colors: new Map(),       // book_id -> 调色板序号 1..8
   colorSeq: 0,
@@ -91,6 +93,13 @@ function fmtClock(seconds) {
   const h = Math.floor(s / 3600) % 24;
   const m = Math.floor((s % 3600) / 60);
   return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+}
+
+function fmtDateTime(ts) {
+  if (!ts) return "未知时间";
+  const d = new Date(ts * 1000);
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
 function isoOf(date) {
@@ -217,14 +226,28 @@ function setOnline(online, host) {
   if (host) state.host = host;
   $("#deviceDot").className = "dot " + (online ? "online" : "offline");
   $("#chipHost").textContent = host || "未配置";
-  $("#chipSub").textContent = online ? "已连接" : "未连接";
+  $("#chipSub").textContent = online
+    ? "已连接"
+    : state.cacheOffline ? "离线 · 用缓存" : "未连接";
+  updateBanner();
+}
+
+function updateBanner() {
   const banner = $("#offlineBanner");
-  if (online) {
-    banner.hidden = true;
-  } else {
+  if (state.cacheOffline) {
     banner.hidden = false;
-    $("#offlineText").textContent = `连不上 ${host || "设备"}，可能已休眠、SSH 关闭或 IP 变了`;
+    banner.classList.add("warn");
+    $("#offlineText").textContent =
+      `连不上设备，正在看 ${fmtDateTime(state.cachedAt)} 缓存的统计数据`;
+    return;
   }
+  banner.classList.remove("warn");
+  if (state.online === false) {
+    banner.hidden = false;
+    $("#offlineText").textContent = `连不上 ${state.host || "设备"}，可能已休眠、SSH 关闭或 IP 变了`;
+    return;
+  }
+  banner.hidden = true;
 }
 
 /* ---------- 阅读统计：概览 ---------- */
@@ -235,13 +258,35 @@ async function loadStats(force = false) {
     const data = await api(`/api/stats?range=${state.range}${force ? "&refresh=1" : ""}`);
     state.stats = data;
     state.loaded.stats = true;
-    setOnline(true, data.host);
+    state.cachedAt = data.cached_at;
+    // 只有本次真的连上设备才算在线；命中有效期内的缓存不改变在线判断，
+    // 否则设备刚断开时会被缓存"伪装"成在线
+    if (data.source === "device") {
+      state.cacheOffline = false;
+      setOnline(true, data.host);
+    } else if (data.offline) {
+      state.cacheOffline = true;
+      setOnline(false, data.host);
+    } else {
+      state.cacheOffline = state.online === false;
+      updateBanner();
+    }
     paintStats();
-    $("#pageSub").textContent = `数据更新于 ${new Date().toLocaleTimeString("zh-CN")}`;
+    if (state.cacheOffline) {
+      $("#pageSub").textContent = `离线模式 · 缓存于 ${fmtDateTime(data.cached_at)}`;
+    } else if (data.source === "device") {
+      $("#pageSub").textContent = `数据更新于 ${new Date().toLocaleTimeString("zh-CN")}`;
+    } else {
+      $("#pageSub").textContent = `数据取自 ${fmtDateTime(data.cached_at)} 的本地缓存`;
+    }
+    if (state.cacheOffline && force) {
+      toast("设备仍未连接，继续显示缓存数据");
+    }
     await Promise.all([loadCalendar(), loadDay(state.selectedDate)]);
   } catch (err) {
     $("#pageSub").textContent = "读取失败";
     state.loaded.stats = true;
+    state.cacheOffline = false;
     if (err.deviceError || err.status === 503) {
       setOnline(false, state.host);
       $("#offlineBanner").hidden = false;
@@ -257,9 +302,7 @@ function paintStats() {
   const o = d.overview;
 
   $("#kpiTotal").textContent = fmtDuration(o.total_seconds);
-  $("#kpiTotalFoot").textContent = d.range_start
-    ? `${d.range_label} · 自 ${d.range_start}`
-    : `累计 ${fmtDuration(d.all_time_seconds)}`;
+  $("#kpiTotalFoot").textContent = `日均 ${o.avg_minutes} 分钟`;
 
   $("#kpiPages").textContent = o.page_records.toLocaleString("zh-CN");
   $("#kpiPagesFoot").textContent = `涉及 ${o.total_books} 本书`;
@@ -576,6 +619,9 @@ function paintTimeline(day) {
     const t = document.createElement("span");
     t.textContent = String(h).padStart(2, "0");
     t.style.left = `${(h / 24) * 100}%`;
+    // 首尾刻度贴边，否则会有一半溢出到卡片外
+    if (h === 0) t.style.transform = "translateX(0)";
+    else if (h === 24) t.style.transform = "translateX(-100%)";
     axis.appendChild(t);
   }
   wrap.appendChild(head);

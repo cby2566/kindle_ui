@@ -8,6 +8,7 @@ kwp3_tools/script/kindle_ssh.py 处理，本模块只加连接管理、错误归
 """
 import asyncio
 import os
+import socket
 import stat as statmod
 import sys
 import time
@@ -58,9 +59,13 @@ def _friendly(exc):
     msg = str(exc)
     if isinstance(exc, paramiko.AuthenticationException):
         return "认证失败：请在 KOReader 里勾选 Login without password 后重启 SSH 服务"
-    if "timed out" in msg.lower() or "timeout" in msg.lower():
-        return "连接超时，设备可能已休眠或 IP 变了"
-    if "refused" in msg.lower():
+    # 10060 = WSAETIMEDOUT，Windows 下 errno 可能为空、错因在 winerror 里
+    codes = (getattr(exc, "errno", None), getattr(exc, "winerror", None))
+    if isinstance(exc, (socket.timeout, TimeoutError)) or 10060 in codes or 110 in codes:
+        return "连接超时，设备可能已休眠、KOReader 已关闭或 IP 变了"
+    if "timed out" in msg.lower():
+        return "连接超时，设备可能已休眠、KOReader 已关闭或 IP 变了"
+    if 10061 in codes or "refused" in msg.lower():
         return "端口不通，KOReader 的 SSH 服务可能已关闭"
     return msg or exc.__class__.__name__
 
@@ -71,7 +76,21 @@ class Kindle:
         self.host = host or cfg["host"]
         self.port = int(port or cfg["port"])
 
+    def _probe_tcp(self, timeout=3):
+        """先做一次快速的 TCP 探活。
+
+        设备关机时 Windows 的 SYN 重试要 21 秒才报错，而 paramiko 的
+        banner_timeout 只管握手后的阶段，管不到这一步。先探一下能把
+        离线判断压到 timeout 秒内，避免界面长时间转圈。
+        """
+        try:
+            with socket.create_connection((self.host, self.port), timeout=timeout):
+                return True
+        except OSError as exc:
+            raise DeviceError(_friendly(exc)) from exc
+
     def _connect(self, timeout=8):
+        self._probe_tcp(min(timeout, 3))
         try:
             return kindle_ssh.connect(self.host, self.port, timeout)
         except Exception as exc:  # 统一成 DeviceError，前端只看 message
@@ -97,8 +116,8 @@ class Kindle:
     # ---------- SFTP ----------
 
     @contextmanager
-    def sftp(self):
-        transport = self._connect()
+    def sftp(self, timeout=8):
+        transport = self._connect(timeout=timeout)
         try:
             yield paramiko.SFTPClient.from_transport(transport)
         except DeviceError:
@@ -128,10 +147,10 @@ class Kindle:
         rows.sort(key=lambda r: (not r["is_dir"], r["name"].lower()))
         return rows
 
-    def download(self, remote, local):
+    def download(self, remote, local, timeout=8):
         remote = safe_path(remote)
         try:
-            with self.sftp() as sftp:
+            with self.sftp(timeout=timeout) as sftp:
                 sftp.get(remote, str(local))
         except FileNotFoundError:
             raise DeviceError("文件不存在：{}".format(remote))

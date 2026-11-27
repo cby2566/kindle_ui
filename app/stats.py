@@ -18,8 +18,10 @@
 import datetime as dt
 import sqlite3
 import time
+from pathlib import Path
 
 from . import config
+from .device import DeviceError
 
 # KOReader 默认值
 DEFAULT_MIN_READ_SEC = 5
@@ -37,16 +39,72 @@ RANGE_LABELS = {
 
 
 class StatsCache:
+    """本地统计库缓存。设备不可达时退化为只读缓存，保证离线也能看历史。"""
+
     def __init__(self):
         self.db_path = config.CACHE_DIR / "statistics.sqlite3"
-        self.fetched_at = 0.0
+        self.fetched_at = self._file_mtime()
+        self.offline = False
+        self.source = "cache"       # device = 本次真的连上设备拿了新库
+        self.last_error = None
+
+    def _file_mtime(self):
+        try:
+            return self.db_path.stat().st_mtime
+        except OSError:
+            return 0.0
+
+    def _clear_sidecars(self):
+        """清掉 -wal / -shm / -journal。
+
+        下载会整体覆盖主库文件，若旧的 WAL 还留着，SQLite 会把过期的
+        增量回放到新库上，轻则读数错乱、重则报 malformed。
+        设备侧 KOReader 每次 insertDB 后都会关连接触发 checkpoint，
+        实测 statistics.sqlite3-wal 恒为 0 字节，所以只取主库足够。
+        """
+        for suffix in ("-wal", "-shm", "-journal"):
+            try:
+                Path(str(self.db_path) + suffix).unlink()
+            except OSError:
+                pass
+
+    def has_cache(self):
+        return self.db_path.exists() and self.db_path.stat().st_size > 0
 
     def ensure(self, kindle, max_age=90, force=False):
-        fresh = self.db_path.exists() and (time.time() - self.fetched_at) < max_age
+        """拉取统计库。
+
+        返回 (path, offline)。设备连不上但本地有缓存时不抛异常，
+        而是标记 offline=True 继续用缓存，历史数据照样能看。
+        """
+        fresh = self.has_cache() and (time.time() - self.fetched_at) < max_age
         if fresh and not force:
+            self.offline = False
+            self.source = "cache"
             return self.db_path
-        kindle.download("/mnt/us/koreader/settings/statistics.sqlite3", self.db_path)
+
+        # 已有缓存时缩短连接超时，避免离线启动干等
+        timeout = 4 if self.has_cache() else 8
+        try:
+            kindle.download("/mnt/us/koreader/settings/statistics.sqlite3",
+                            self.db_path, timeout=timeout)
+        except Exception as exc:
+            if not self.has_cache():
+                raise DeviceError(
+                    "设备未连接，且本地还没有统计缓存。请先连上设备读取一次，"
+                    "之后即使断开也能查看历史数据。"
+                ) from exc
+            self.offline = True
+            self.source = "cache"
+            self.last_error = str(exc) or exc.__class__.__name__
+            self.fetched_at = self._file_mtime()
+            return self.db_path
+
         self.fetched_at = time.time()
+        self.offline = False
+        self.source = "device"
+        self.last_error = None
+        self._clear_sidecars()
         return self.db_path
 
     def _connect(self):

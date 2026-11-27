@@ -78,7 +78,17 @@ def get_stats(range: str = "all", refresh: int = 0):
         raise HTTPException(400, "不支持的时间范围：{}".format(range))
     data = CACHE.snapshot(range)
     data["host"] = k.host
+    data.update(_cache_state())
     return data
+
+
+def _cache_state():
+    return {
+        "offline": CACHE.offline,
+        "source": CACHE.source,
+        "cached_at": int(CACHE.fetched_at) if CACHE.fetched_at else None,
+        "cache_error": CACHE.last_error,
+    }
 
 
 @app.get("/api/stats/calendar")
@@ -94,6 +104,7 @@ def get_calendar(month: str = ""):
         year, mon = today.year, today.month
     data = CACHE.calendar(year, mon)
     data["today"] = today.isoformat()
+    data.update(_cache_state())
     return data
 
 
@@ -106,7 +117,9 @@ def get_day(date: str = ""):
             raise HTTPException(400, "日期格式应为 YYYY-MM-DD")
     else:
         target = dt.date.today()
-    return CACHE.day(target)
+    data = CACHE.day(target)
+    data.update(_cache_state())
+    return data
 
 
 # ---------- 书库 ----------

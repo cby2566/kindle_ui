@@ -12,6 +12,7 @@
   --danger: #c0392b;
   --danger-soft: #fbeeec;
   --warn: #b07d1a;
+  --warn-soft: #fbf3e0;
   --shadow: 0 1px 2px rgba(28, 30, 33, .04), 0 6px 18px rgba(28, 30, 33, .04);
   --radius: 14px;
   --radius-sm: 9px;
@@ -40,6 +41,7 @@
     --danger: #e07a6e;
     --danger-soft: #35231f;
     --warn: #d8a94a;
+    --warn-soft: #332a17;
     --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 6px 18px rgba(0, 0, 0, .22);
     --book-1: #4fbfa0;
     --book-2: #6fa3d8;
@@ -294,6 +296,14 @@ button, input { font: inherit; color: inherit; }
 }
 
 .banner[hidden] { display: none; }
+
+.banner.warn {
+  border-color: var(--warn);
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
+.banner.warn .btn { color: var(--warn); border-color: var(--warn); }
 
 .view { display: none; }
 
