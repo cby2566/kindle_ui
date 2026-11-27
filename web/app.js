@@ -23,6 +23,8 @@ const state = {
   status: null,
   online: null,
   cacheOffline: false,
+  // 本地模式：只读缓存，彻底不碰设备。跨会话记住，重开还是这个模式
+  local: localStorage.getItem("kwp.localMode") === "1",
   cachedAt: null,
   charts: {},
   timeline: null,          // vis.Timeline 实例
@@ -235,8 +237,20 @@ function applyView(view) {
   }
   paintActions();
 
-  if (view === "library" && !state.loaded.library) loadFiles(state.path);
-  if (view === "device") loadStatus();
+  if (view === "library") {
+    if (state.local) {
+      toast("本地模式下不浏览书库，关掉开关即可连接设备");
+    } else if (!state.loaded.library) {
+      loadFiles(state.path);
+    }
+  }
+  if (view === "device") {
+    if (state.local) {
+      toast("本地模式下不读取设备状态，关掉开关即可连接");
+    } else {
+      loadStatus();
+    }
+  }
 }
 
 function applySub(sub, arg) {
@@ -339,17 +353,31 @@ async function pingDevice() {
 function setOnline(online, host) {
   state.online = online;
   if (host) state.host = host;
-  $("#deviceDot").className = "dot " + (online ? "online" : "offline");
+  $("#deviceDot").className = "dot " + (state.local ? "local" : online ? "online" : "offline");
   // 有些接口（如 /api/stats/week）不回传 host，不能因此把已有地址冲成「未配置」
   $("#chipHost").textContent = state.host || "未配置";
-  $("#chipSub").textContent = online
-    ? "已连接"
-    : state.cacheOffline ? "离线 · 用缓存" : "未连接";
+  $("#chipSub").textContent = state.local
+    ? "本地模式 · 只读缓存"
+    : online
+      ? "已连接"
+      : state.cacheOffline ? "离线 · 用缓存" : "未连接";
   updateBanner();
 }
 
 function updateBanner() {
   const banner = $("#offlineBanner");
+  if (state.local) {
+    banner.hidden = false;
+    banner.classList.remove("warn");
+    banner.classList.add("info");
+    $("#offlineText").textContent = state.cachedAt
+      ? `本地模式 · 正在看 ${fmtDateTime(state.cachedAt)} 的缓存，不会连接设备`
+      : "本地模式 · 正在看本地缓存，不会连接设备";
+    $("#bannerScan").hidden = true;
+    return;
+  }
+  $("#bannerScan").hidden = false;
+  banner.classList.remove("info");
   if (state.cacheOffline) {
     banner.hidden = false;
     banner.classList.add("warn");
@@ -366,6 +394,46 @@ function updateBanner() {
   banner.hidden = true;
 }
 
+/** 切换本地模式：同步状态、记忆与界面；关掉时顺手探一次设备。 */
+function applyLocalMode(on) {
+  state.local = on;
+  localStorage.setItem("kwp.localMode", on ? "1" : "0");
+  $("#localRow").setAttribute("aria-pressed", on ? "true" : "false");
+  $("#localRow").classList.toggle("is-on", on);
+
+  state.online = null;
+  state.cacheOffline = false;
+  if (on) {
+    $("#deviceDot").className = "dot local";
+    $("#chipSub").textContent = "本地模式 · 只读缓存";
+    updateBanner();
+  } else {
+    $("#deviceDot").className = "dot";
+    $("#chipSub").textContent = "检测中…";
+    updateBanner();
+    pingDevice();
+  }
+}
+
+/** 切换模式后把当前这一页按新口径重新取一遍。 */
+function reloadCurrent(force = true) {
+  if (state.view === "stats") {
+    if (state.sub === "overview" || state.sub === "books") {
+      loadStats(force);
+    } else if (state.sub === "week") {
+      loadWeek(state.weekStart);
+    } else if (state.sub === "calendar") {
+      loadCalendar(state.calMonth && state.calMonth.year, state.calMonth && state.calMonth.month);
+    } else if (state.sub === "day") {
+      loadDay(state.selectedDate);
+    }
+  } else if (state.view === "device" && !state.local) {
+    loadStatus(true);
+  } else if (state.view === "library" && !state.local) {
+    loadFiles(state.path);
+  }
+}
+
 /* ---------- 阅读统计：概览 ---------- */
 
 /**
@@ -375,6 +443,12 @@ function updateBanner() {
 function syncOfflineState(data) {
   if (!data) return;
   if (data.cached_at) state.cachedAt = data.cached_at;
+  if (data.source === "local") {
+    state.cacheOffline = false;
+    // 首次加载前横幅拿不到 cached_at，这里补一次刷新
+    updateBanner();
+    return;
+  }
   if (data.source === "device") {
     state.cacheOffline = false;
     setOnline(true, data.host);
@@ -392,14 +466,19 @@ function offlineSuffix() {
 }
 
 async function loadStats(force = false) {
-  $("#pageSub").textContent = "正在从设备读取统计库…";
+  $("#pageSub").textContent = state.local ? "正在读取本地缓存…" : "正在从设备读取统计库…";
   try {
-    const data = await api(`/api/stats?range=${state.range}${force ? "&refresh=1" : ""}`);
+    const q = new URLSearchParams({ range: state.range });
+    if (force) q.set("refresh", "1");
+    if (state.local) q.set("local", "1");
+    const data = await api(`/api/stats?${q.toString()}`);
     state.stats = data;
     state.loaded.stats = true;
     syncOfflineState(data);
     paintStats();
-    if (state.cacheOffline) {
+    if (state.local) {
+      $("#pageSub").textContent = `本地模式 · 缓存于 ${fmtDateTime(data.cached_at)}`;
+    } else if (state.cacheOffline) {
       $("#pageSub").textContent = `离线模式 · 缓存于 ${fmtDateTime(data.cached_at)}`;
     } else if (data.source === "device") {
       $("#pageSub").textContent = `数据更新于 ${new Date().toLocaleTimeString("zh-CN")}`;
@@ -1401,8 +1480,15 @@ function bindEvents() {
   $$(".nav-item").forEach((b) => b.onclick = () => switchView(b.dataset.view));
   $("#deviceChip").onclick = () => switchView("device");
   $("#bannerScan").onclick = () => {
+    if (state.local) applyLocalMode(false);
     switchView("device");
     scanDevices();
+  };
+  $("#localRow").onclick = () => {
+    const on = !state.local;
+    applyLocalMode(on);
+    reloadCurrent();
+    toast(on ? "已切到本地模式，不再连接设备" : "已切回联网模式");
   };
   $("#btnUpload").onclick = () => $("#fileInput").click();
   $("#fileInput").onchange = (e) => {
@@ -1527,7 +1613,17 @@ async function boot() {
   }
   $("#deviceDot").className = "dot";
   $("#chipSub").textContent = "检测中…";
-  await pingDevice();
+  $("#localRow").setAttribute("aria-pressed", state.local ? "true" : "false");
+  $("#localRow").classList.toggle("is-on", state.local);
+
+  if (state.local) {
+    // 本地模式启动：不探活、不拉状态，直接读缓存
+    $("#deviceDot").className = "dot local";
+    $("#chipSub").textContent = "本地模式 · 只读缓存";
+    updateBanner();
+  } else {
+    await pingDevice();
+  }
 
   // 按地址栏落地：支持 #stats/week/2026-11-23 这类深链，缺省落概览
   const route = parseHash();
