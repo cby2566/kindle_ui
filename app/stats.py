@@ -85,6 +85,7 @@ class StatsCache:
 
         # 已有缓存时缩短连接超时，避免离线启动干等
         timeout = 4 if self.has_cache() else 8
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
         try:
             kindle.download("/mnt/us/koreader/settings/statistics.sqlite3",
                             self.db_path, timeout=timeout)

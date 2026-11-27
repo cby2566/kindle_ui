@@ -3,14 +3,15 @@
 """设备访问层。
 
 SSH 细节（dropbear 主机密钥缺陷、空密码提交）全部交给
-kwp3_tools/script/kindle_ssh.py 处理，本模块只加连接管理、错误归一化和
-「人话」结果，避免出现两份 SSH 代码各自演化。
+app/kindle_ssh.py 处理，本模块只加连接管理、错误归一化和「人话」结果。
+
+注意：kindle_ssh.py 是从 kwp3_tools/script/ 复制进来的副本，
+这份仓库需要能被其他人单独克隆后直接运行，不能依赖同级目录。
 """
 import asyncio
 import os
 import socket
 import stat as statmod
-import sys
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -18,20 +19,8 @@ from pathlib import Path
 import paramiko
 
 from . import config
+from . import kindle_ssh
 
-
-def _script_dir() -> Path:
-    env = os.environ.get("KWP3_SCRIPT_DIR")
-    if env:
-        return Path(env)
-    return config.ROOT.parent / "kwp3_tools" / "script"
-
-
-_SCRIPT_DIR = _script_dir()
-if str(_SCRIPT_DIR) not in sys.path:
-    sys.path.insert(0, str(_SCRIPT_DIR))
-
-import kindle_ssh  # noqa: E402  (依赖上面的 sys.path 注入)
 
 # /mnt/us 下不允许删除的目录，误删会 brick 掉系统组件
 PROTECTED = (
