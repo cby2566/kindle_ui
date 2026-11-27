@@ -45,6 +45,7 @@ class StatsCache:
         self.db_path = config.CACHE_DIR / "statistics.sqlite3"
         self.fetched_at = self._file_mtime()
         self.offline = False
+        self.local = False          # 本地模式：只读缓存，完全不碰设备
         self.source = "cache"       # device = 本次真的连上设备拿了新库
         self.last_error = None
 
@@ -71,12 +72,28 @@ class StatsCache:
     def has_cache(self):
         return self.db_path.exists() and self.db_path.stat().st_size > 0
 
-    def ensure(self, kindle, max_age=90, force=False):
+    def ensure(self, kindle, max_age=90, force=False, local=False):
         """拉取统计库。
 
         返回 (path, offline)。设备连不上但本地有缓存时不抛异常，
         而是标记 offline=True 继续用缓存，历史数据照样能看。
+
+        local=True 时彻底跳过设备：只读本地缓存，不再探活、不再下载。
+        适用于「手头没有设备、只想翻历史」的场景，省掉每次都干等超时。
         """
+        self.local = bool(local)
+        if local:
+            if not self.has_cache():
+                raise DeviceError(
+                    "本地模式需要至少连过一次设备：本地还没有统计库缓存。"
+                    "请先关闭本地模式、连上设备读取一次。"
+                )
+            self.offline = False
+            self.source = "local"
+            self.last_error = None
+            self.fetched_at = self._file_mtime()
+            return self.db_path
+
         fresh = self.has_cache() and (time.time() - self.fetched_at) < max_age
         if fresh and not force:
             self.offline = False

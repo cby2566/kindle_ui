@@ -71,9 +71,9 @@ def discover(payload: dict = Body(default={})):
 # ---------- 阅读统计 ----------
 
 @app.get("/api/stats")
-def get_stats(range: str = "all", refresh: int = 0):
+def get_stats(range: str = "all", refresh: int = 0, local: int = 0):
     k = dev.Kindle()
-    CACHE.ensure(k, force=bool(refresh))
+    CACHE.ensure(k, force=bool(refresh), local=bool(local))
     if range not in stats.RANGE_LABELS:
         raise HTTPException(400, "不支持的时间范围：{}".format(range))
     data = CACHE.snapshot(range)
@@ -85,6 +85,7 @@ def get_stats(range: str = "all", refresh: int = 0):
 def _cache_state():
     return {
         "offline": CACHE.offline,
+        "local": CACHE.local,
         "source": CACHE.source,
         "cached_at": int(CACHE.fetched_at) if CACHE.fetched_at else None,
         "cache_error": CACHE.last_error,
@@ -229,9 +230,22 @@ def mkdir(payload: dict = Body(...)):
 
 # ---------- 静态资源 ----------
 
+class NoCacheStatic(StaticFiles):
+    """本地小工具，静态文件不必缓存。
+
+    StaticFiles 默认只发 ETag/Last-Modified，Chrome 会走启发式缓存直接复用旧文件，
+    改完 app.js / style.css 刷新看不到变化，容易误判成代码没生效。
+    """
+
+    async def get_response(self, path, scope):
+        resp = await super().get_response(path, scope)
+        resp.headers["Cache-Control"] = "no-cache"
+        return resp
+
+
 @app.get("/")
 def index():
     return FileResponse(config.WEB_DIR / "index.html", headers={"Cache-Control": "no-store"})
 
 
-app.mount("/static", StaticFiles(directory=str(config.WEB_DIR)), name="static")
+app.mount("/static", NoCacheStatic(directory=str(config.WEB_DIR)), name="static")
