@@ -8,12 +8,15 @@ const WEEK_FULL = ["周一", "周二", "周三", "周四", "周五", "周六", "
 
 const state = {
   view: "stats",
+  sub: "overview",         // 统计页的子页：overview / week / calendar / day / books
   host: "",
   port: 2222,
   path: "/mnt/us/documents",
   range: "all",
   calMonth: null,          // {year, month}
   selectedDate: null,      // 'YYYY-MM-DD'
+  weekStart: null,         // 'YYYY-MM-DD'，该周周一
+  week: null,
   stats: null,
   calendar: null,
   day: null,
@@ -27,6 +30,15 @@ const state = {
   colorSeq: 0,
   loaded: { stats: false, library: false, device: false },
 };
+
+const SUB_META = {
+  overview: { title: "概览", sub: "区间合计、每日趋势与时段偏好" },
+  week: { title: "周视图", sub: "这一周与上一周的对照" },
+  calendar: { title: "日历", sub: "按月铺开，看哪几天读了书" },
+  day: { title: "单日", sub: "一天之内的阅读时间轴" },
+  books: { title: "书籍", sub: "书目排行与阅读进度" },
+};
+const SUBS = Object.keys(SUB_META);
 
 /* ---------- 基础工具 ---------- */
 
@@ -176,7 +188,7 @@ window.addEventListener("resize", () => {
 
 window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", disposeCharts);
 
-/* ---------- 视图切换 ---------- */
+/* ---------- 视图切换与路由 ---------- */
 
 const VIEW_META = {
   stats: { title: "阅读统计", sub: "来自设备上的 KOReader 阅读记录" },
@@ -184,37 +196,118 @@ const VIEW_META = {
   device: { title: "设备", sub: "连接状态与系统信息" },
 };
 
-function switchView(view) {
+function buildHash(view, sub, arg) {
+  if (view !== "stats") return `#${view}`;
+  return "#" + ["stats", sub, arg].filter(Boolean).join("/");
+}
+
+function parseHash() {
+  const raw = (location.hash || "").replace(/^#\/?/, "");
+  if (!raw) return { view: "stats", sub: "overview", arg: null };
+  const parts = raw.split("/").filter(Boolean);
+  const view = parts[0] === "library" || parts[0] === "device" ? parts[0] : "stats";
+  if (view !== "stats") return { view, sub: null, arg: null };
+  const sub = SUBS.includes(parts[1]) ? parts[1] : "overview";
+  return { view: "stats", sub, arg: parts[2] || null };
+}
+
+/** 唯一的路由入口：落地状态、刷新标题、同步地址栏。 */
+function go(view, sub, arg) {
+  applyView(view);
+  if (view === "stats") applySub(sub || "overview", arg || null);
+  const hash = buildHash(view, view === "stats" ? (sub || "overview") : null,
+                         view === "stats" ? arg : null);
+  if (location.hash !== hash) {
+    // replaceState 不触发 hashchange，避免与监听器互相打转
+    history.replaceState(null, "", hash);
+  }
+}
+
+function applyView(view) {
   state.view = view;
   $$(".nav-item").forEach((b) => b.classList.toggle("is-active", b.dataset.view === view));
   $$(".view").forEach((v) => v.classList.toggle("is-active", v.id === `view-${view}`));
   $("#pageTitle").textContent = VIEW_META[view].title;
-  $("#pageSub").textContent = VIEW_META[view].sub;
+  try {
+    $("#view-stats").classList.toggle("has-subtabs", view === "stats");
+  } catch (err) {
+    /* 结构缺失时忽略 */
+  }
   paintActions();
 
-  if (view === "stats") {
-    if (!state.loaded.stats) loadStats();
-    else setTimeout(() => {
-      Object.values(state.charts).forEach((c) => c.resize());
-      // 视图从 display:none 切回来后，vis 需要重新量一次尺寸
-      if (state.timeline) {
-        try {
-          state.timeline.redraw();
-        } catch (err) {
-          /* 已销毁 */
-        }
-      }
-    }, 30);
-  }
   if (view === "library" && !state.loaded.library) loadFiles(state.path);
   if (view === "device") loadStatus();
+}
+
+function applySub(sub, arg) {
+  if (!SUBS.includes(sub)) sub = "overview";
+  state.sub = sub;
+
+  $$("#statsTabs button").forEach((b) => b.classList.toggle("is-on", b.dataset.sub === sub));
+  $$(".subview").forEach((v) => v.classList.toggle("is-active", v.id === `sub-${sub}`));
+
+  // 时间范围只服务概览与书籍两页；日历按月、单日按天、周按周，各管各的
+  $("#rangeBar").hidden = !(sub === "overview" || sub === "books");
+
+  const meta = SUB_META[sub];
+  $("#pageSub").textContent = state.view === "stats" ? `${meta.title} · ${meta.sub}` : meta.sub;
+  paintActions();
+
+  if (sub === "overview" || sub === "books") {
+    if (!state.loaded.stats) loadStats();
+    else if (sub === "overview") relayoutCharts();
+  } else if (sub === "week") {
+    loadWeek(arg || state.weekStart || isoOf(new Date()));
+  } else if (sub === "calendar") {
+    if (arg && /^\d{4}-\d{2}$/.test(arg)) {
+      const [y, m] = arg.split("-").map(Number);
+      state.calMonth = { year: y, month: m };
+    }
+    if (!state.loaded.stats) {
+      loadStats().then(() => loadCalendar(state.calMonth && state.calMonth.year,
+                                          state.calMonth && state.calMonth.month));
+    } else {
+      loadCalendar(state.calMonth && state.calMonth.year, state.calMonth && state.calMonth.month);
+    }
+  } else if (sub === "day") {
+    if (arg && /^\d{4}-\d{2}-\d{2}$/.test(arg)) state.selectedDate = arg;
+    if (!state.loaded.stats) loadStats().then(() => loadDay(state.selectedDate));
+    else loadDay(state.selectedDate);
+  }
+}
+
+function relayoutCharts() {
+  setTimeout(() => {
+    Object.values(state.charts).forEach((c) => c.resize());
+    if (state.timeline) {
+      try {
+        state.timeline.redraw();
+      } catch (err) {
+        /* 已销毁 */
+      }
+    }
+  }, 30);
+}
+
+function switchView(view) {
+  go(view, view === "stats" ? state.sub : null, null);
 }
 
 function paintActions() {
   const box = $("#pageActions");
   box.innerHTML = "";
   if (state.view === "stats") {
-    box.appendChild(button("刷新数据", "btn btn-primary", () => loadStats(true)));
+    if (state.sub === "week") {
+      box.appendChild(button("刷新数据", "btn btn-primary", () => loadWeek(state.weekStart, true)));
+    } else if (state.sub === "calendar") {
+      box.appendChild(button("刷新数据", "btn btn-primary", () => {
+        loadCalendar(state.calMonth && state.calMonth.year, state.calMonth && state.calMonth.month);
+      }));
+    } else if (state.sub === "day") {
+      box.appendChild(button("刷新数据", "btn btn-primary", () => loadDay(state.selectedDate)));
+    } else {
+      box.appendChild(button("刷新数据", "btn btn-primary", () => loadStats(true)));
+    }
   } else if (state.view === "library") {
     box.appendChild(button("刷新", "btn", () => loadFiles(state.path)));
   } else if (state.view === "device") {
@@ -247,7 +340,8 @@ function setOnline(online, host) {
   state.online = online;
   if (host) state.host = host;
   $("#deviceDot").className = "dot " + (online ? "online" : "offline");
-  $("#chipHost").textContent = host || "未配置";
+  // 有些接口（如 /api/stats/week）不回传 host，不能因此把已有地址冲成「未配置」
+  $("#chipHost").textContent = state.host || "未配置";
   $("#chipSub").textContent = online
     ? "已连接"
     : state.cacheOffline ? "离线 · 用缓存" : "未连接";
@@ -274,25 +368,36 @@ function updateBanner() {
 
 /* ---------- 阅读统计：概览 ---------- */
 
+/**
+ * 任何统计接口返回都带 source/offline/cached_at，统一在这里同步在线状态。
+ * 否则深链直接进周页、日历页时，从没请求过 /api/stats，横幅就一直误报。
+ */
+function syncOfflineState(data) {
+  if (!data) return;
+  if (data.cached_at) state.cachedAt = data.cached_at;
+  if (data.source === "device") {
+    state.cacheOffline = false;
+    setOnline(true, data.host);
+  } else if (data.offline) {
+    state.cacheOffline = true;
+    setOnline(false, data.host);
+  } else if (state.online === false) {
+    state.cacheOffline = true;
+    updateBanner();
+  }
+}
+
+function offlineSuffix() {
+  return state.cacheOffline ? ` · 缓存于 ${fmtDateTime(state.cachedAt)}` : "";
+}
+
 async function loadStats(force = false) {
   $("#pageSub").textContent = "正在从设备读取统计库…";
   try {
     const data = await api(`/api/stats?range=${state.range}${force ? "&refresh=1" : ""}`);
     state.stats = data;
     state.loaded.stats = true;
-    state.cachedAt = data.cached_at;
-    // 只有本次真的连上设备才算在线；命中有效期内的缓存不改变在线判断，
-    // 否则设备刚断开时会被缓存"伪装"成在线
-    if (data.source === "device") {
-      state.cacheOffline = false;
-      setOnline(true, data.host);
-    } else if (data.offline) {
-      state.cacheOffline = true;
-      setOnline(false, data.host);
-    } else {
-      state.cacheOffline = state.online === false;
-      updateBanner();
-    }
+    syncOfflineState(data);
     paintStats();
     if (state.cacheOffline) {
       $("#pageSub").textContent = `离线模式 · 缓存于 ${fmtDateTime(data.cached_at)}`;
@@ -318,13 +423,32 @@ async function loadStats(force = false) {
   }
 }
 
+const RANGE_TITLE = {
+  today: "本日阅读",
+  week: "本周阅读",
+  month: "本月阅读",
+  year: "本年阅读",
+  all: "累计阅读",
+};
+
 function paintStats() {
   const d = state.stats;
   if (!d) return;
   const o = d.overview;
 
+  $("#kpiTotalLabel").textContent = RANGE_TITLE[d.range] || "阅读时长";
   $("#kpiTotal").textContent = fmtDuration(o.total_seconds);
-  $("#kpiTotalFoot").textContent = `日均 ${o.avg_minutes} 分钟`;
+  if (d.range === "all" || !d.all_time_seconds) {
+    $("#kpiTotalFoot").textContent = "有记录以来";
+  } else {
+    const pct = Math.round((o.total_seconds * 100) / d.all_time_seconds);
+    $("#kpiTotalFoot").textContent = `占全部阅读 ${pct}%`;
+  }
+
+  $("#kpiAvg").textContent = o.active_days ? `${o.avg_minutes} 分钟` : "—";
+  $("#kpiAvgFoot").textContent = o.active_days
+    ? `按 ${o.active_days} 个阅读日平均`
+    : "暂无阅读记录";
 
   $("#kpiPages").textContent = o.page_records.toLocaleString("zh-CN");
   $("#kpiPagesFoot").textContent = `涉及 ${o.total_books} 本书`;
@@ -468,6 +592,211 @@ function paintBooks(books) {
   });
 }
 
+/* ---------- 周视图 ---------- */
+
+function fmtMD(iso) {
+  return iso ? iso.slice(5) : "—";
+}
+
+async function loadWeek(start) {
+  try {
+    const data = await api(`/api/stats/week${start ? `?start=${start}` : ""}`);
+    state.week = data;
+    state.weekStart = data.start;
+    syncOfflineState(data);
+    paintWeek(data);
+    const want = buildHash("stats", "week", data.start);
+    if (state.view === "stats" && state.sub === "week" && location.hash !== want) {
+      history.replaceState(null, "", want);
+    }
+    setTimeout(() => {
+      if (state.charts.weekChart) state.charts.weekChart.resize();
+    }, 30);
+  } catch (err) {
+    toast(err.message, "err");
+  }
+}
+
+function shiftWeek(delta) {
+  const base = parseDate(state.weekStart || isoOf(new Date()));
+  base.setDate(base.getDate() + delta * 7);
+  go("stats", "week", isoOf(base));
+}
+
+function paintWeek(w) {
+  const o = w.overview;
+
+  if (state.view === "stats" && state.sub === "week") {
+    $("#pageSub").textContent = state.cacheOffline
+      ? `周视图${offlineSuffix()}`
+      : `周视图 · 这一周与上一周的对照`;
+  }
+
+  $("#wkRange").textContent = `${fmtMD(w.start)} ~ ${fmtMD(w.end)}`;
+  $("#wkIso").textContent = w.is_current ? "本周" : `第 ${w.iso_week} 周`;
+
+  $("#wkTotal").textContent = fmtDuration(o.seconds);
+  $("#wkTotalFoot").textContent = o.seconds ? `${o.book_count} 本书` : "这一周没有记录";
+
+  $("#wkAvg").textContent = o.avg_minutes ? `${o.avg_minutes} 分钟` : "—";
+  $("#wkAvgFoot").textContent = o.active_days ? `按 ${o.active_days} 个阅读日` : "—";
+
+  $("#wkPages").textContent = o.records.toLocaleString("zh-CN");
+  $("#wkPagesFoot").textContent = `共 ${o.total_days} 天`;
+
+  $("#wkDays").textContent = `${o.active_days} / ${o.total_days} 天`;
+  const rest = o.total_days - o.active_days;
+  $("#wkDaysFoot").textContent = rest ? `休了 ${rest} 天` : "全周满勤";
+
+  const delta = $("#wkDelta");
+  const deltaFoot = $("#wkDeltaFoot");
+  if (w.delta_pct == null) {
+    delta.textContent = "—";
+    delta.classList.remove("is-up", "is-down");
+    deltaFoot.textContent = "上周无记录";
+  } else {
+    const up = w.delta_pct >= 0;
+    delta.textContent = `${up ? "+" : ""}${w.delta_pct}%`;
+    delta.classList.toggle("is-up", up);
+    delta.classList.toggle("is-down", !up);
+    const diff = o.seconds - w.prev.seconds;
+    deltaFoot.textContent = `${diff >= 0 ? "多" : "少"} ${fmtDuration(Math.abs(diff))}`;
+  }
+
+  $("#wkChartSub").textContent = `${fmtMD(w.start)} ~ ${fmtMD(w.end)} · 单位：分钟`;
+  $("#wkBooksHint").textContent = o.book_count ? `${o.book_count} 本` : "—";
+
+  paintWeekChart(w);
+  paintWeekDays(w);
+  paintWeekBooks(w);
+}
+
+function paintWeekChart(w) {
+  const p = palette();
+  const labels = w.days.map((d) => WEEK_NAMES[d.weekday - 1]);
+  const cur = w.days.map((d) => d.minutes);
+  const prev = (w.prev.days || []).map((d) => d.minutes);
+
+  chartOf("weekChart", {
+    backgroundColor: "transparent",
+    grid: { left: 46, right: 16, top: 28, bottom: 30 },
+    tooltip: {
+      trigger: "axis",
+      formatter: (ps) => {
+        const i = ps[0].dataIndex;
+        const d = w.days[i];
+        return [
+          `${WEEK_FULL[d.weekday - 1]} ${fmtMD(d.date)}`,
+          `本周 ${cur[i]} 分钟 · ${d.records} 页`,
+          `上周 ${prev[i] || 0} 分钟`,
+        ].join("<br/>");
+      },
+      backgroundColor: p.panel,
+      borderColor: p.border,
+      textStyle: { color: p.text, fontSize: 12 },
+    },
+    legend: {
+      right: 0,
+      top: 0,
+      itemWidth: 12,
+      itemHeight: 8,
+      textStyle: { color: p.muted, fontSize: 11 },
+      data: ["本周", "上周"],
+    },
+    xAxis: {
+      type: "category",
+      data: labels,
+      axisLine: { lineStyle: { color: p.border } },
+      axisTick: { show: false },
+      axisLabel: { color: p.muted, fontSize: 12 },
+    },
+    yAxis: {
+      type: "value",
+      splitLine: { lineStyle: { color: p.border } },
+      axisLabel: { color: p.muted, fontSize: 11 },
+    },
+    series: [
+      {
+        name: "本周",
+        type: "bar",
+        barMaxWidth: 40,
+        data: cur,
+        itemStyle: { color: p.accent, borderRadius: [4, 4, 0, 0] },
+      },
+      {
+        name: "上周",
+        type: "line",
+        data: prev,
+        symbol: "circle",
+        symbolSize: 5,
+        lineStyle: { color: p.muted, width: 1.5, type: "dashed" },
+        itemStyle: { color: p.muted },
+      },
+    ],
+  });
+}
+
+function paintWeekDays(w) {
+  const box = $("#weekDays");
+  box.innerHTML = "";
+  let i = 0;
+  while (i < 7) {
+    const d = w.days[i];
+    if (!d.seconds) {
+      let j = i;
+      while (j < 7 && !w.days[j].seconds) j += 1;
+      const idle = w.days.slice(i, j);
+      const first = idle[0];
+      const last = idle[idle.length - 1];
+      const label = idle.length === 1
+        ? `${WEEK_FULL[first.weekday - 1]} ${fmtMD(first.date)}`
+        : `${WEEK_FULL[first.weekday - 1]} ${fmtMD(first.date)} ~ ${WEEK_FULL[last.weekday - 1]} ${fmtMD(last.date)}`;
+      const row = document.createElement("div");
+      row.className = "week-day is-empty";
+      row.innerHTML = `<span class="wd-date">${label}</span>
+        <span class="wd-time">—</span>
+        <span class="wd-pages">—</span>
+        <span class="wd-books">未阅读</span>`;
+      box.appendChild(row);
+      i = j;
+      continue;
+    }
+    const titles = d.books.slice(0, 2).map((b) => escapeHtml(b.title)).join("、");
+    const more = d.books.length > 2 ? ` +${d.books.length - 2}` : "";
+    const row = document.createElement("div");
+    row.className = "week-day";
+    row.innerHTML = `<span class="wd-date">${WEEK_FULL[d.weekday - 1]} ${fmtMD(d.date)}</span>
+      <span class="wd-time">${fmtDuration(d.seconds)}</span>
+      <span class="wd-pages">${d.records.toLocaleString("zh-CN")}</span>
+      <span class="wd-books">${titles}${more}</span>`;
+    row.onclick = () => go("stats", "day", d.date);
+    box.appendChild(row);
+    i += 1;
+  }
+}
+
+function paintWeekBooks(w) {
+  const box = $("#weekBooks");
+  box.innerHTML = "";
+  if (!w.books.length) {
+    box.innerHTML = '<div class="empty">这一周没有阅读记录</div>';
+    return;
+  }
+  const top = w.books[0].seconds || 1;
+  w.books.forEach((b) => {
+    const row = document.createElement("div");
+    row.className = "week-book";
+    const width = Math.max(2, Math.round((b.seconds / top) * 100));
+    row.innerHTML = `<i class="swatch" style="background:${bookColor(b.id)}"></i>
+      <span class="wb-title">${escapeHtml(b.title)}</span>
+      <span class="wb-bar"><i style="width:${width}%"></i></span>
+      <span class="wb-num">${fmtDuration(b.seconds)}</span>
+      <span class="wb-share">${b.share}%</span>`;
+    row.title = `读了 ${b.days} 天 · ${b.records} 页`;
+    box.appendChild(row);
+  });
+}
+
 /* ---------- 日历视图（手写，不用日历库） ---------- */
 
 async function loadCalendar(year, month) {
@@ -480,6 +809,7 @@ async function loadCalendar(year, month) {
   try {
     const data = await api(`/api/stats/calendar?month=${year}-${String(month).padStart(2, "0")}`);
     state.calendar = data;
+    syncOfflineState(data);
     paintCalendar(data);
   } catch (err) {
     toast(err.message, "err");
@@ -556,7 +886,7 @@ function paintCalendar(cal) {
     });
     cell.appendChild(histo);
 
-    cell.onclick = () => selectDate(d.date);
+    cell.onclick = () => openDay(d.date);
     grid.appendChild(cell);
   });
 
@@ -582,7 +912,7 @@ function paintSpans(cal) {
     el.title = `${s.title} · ${s.days} 天`;
     // 色条浮在日格之上，不转发点击的话点到色条就选不中这一天
     const dayDate = cal.days[s.start_day] ? cal.days[s.start_day].date : null;
-    if (dayDate) el.onclick = () => selectDate(dayDate);
+    if (dayDate) el.onclick = () => openDay(dayDate);
     const label = document.createElement("span");
     label.textContent = s.title;
     el.appendChild(label);
@@ -605,6 +935,12 @@ function paintLegend(cal) {
   });
 }
 
+/** 从日历或周视图跳进单日页：切页 + 载入该日，地址栏一并更新。 */
+function openDay(date) {
+  state.selectedDate = date;
+  go("stats", "day", date);
+}
+
 async function selectDate(date) {
   state.selectedDate = date;
   $$(".cal-day").forEach((c) => c.classList.toggle("is-sel", c.dataset.date === date));
@@ -619,6 +955,7 @@ async function loadDay(date) {
   try {
     const data = await api(`/api/stats/day?date=${date}`);
     state.day = data;
+    syncOfflineState(data);
     paintTimeline(data);
   } catch (err) {
     toast(err.message, "err");
@@ -946,7 +1283,7 @@ function paintStatus(s) {
     ["内核", s.kernel || "—"],
     ["KOReader", s.koreader || "—"],
     ["运行时长", days > 0 ? `${days} 天 ${hours % 24} 小时` : `${hours} 小时`],
-    ["可用内存", `${s.memory.available_mb} / ${s.memory.total_mb} MB`],
+    ["内存", `剩余 ${s.memory.free_mb} / 可用 ${s.memory.available_mb} / 总内存 ${s.memory.total_mb} MB`],
     ["时钟偏差", s.clock_skew_sec == null ? "—" : `${s.clock_skew_sec} 秒`],
     ["地址", `${s.host}:${s.port}`],
   ];
@@ -1084,6 +1421,25 @@ function bindEvents() {
     loadStats();
   };
 
+  $("#statsTabs").onclick = (e) => {
+    const btn = e.target.closest("button");
+    if (!btn) return;
+    go("stats", btn.dataset.sub, null);
+  };
+
+  $("#wkPrev").onclick = () => shiftWeek(-1);
+  $("#wkNext").onclick = () => shiftWeek(1);
+  $("#wkToday").onclick = () => {
+    state.weekStart = null;
+    go("stats", "week", null);
+  };
+
+  window.addEventListener("hashchange", () => {
+    const route = parseHash();
+    applyView(route.view);
+    if (route.view === "stats") applySub(route.sub || "overview", route.arg || null);
+  });
+
   $("#calPrev").onclick = () => shiftMonth(-1);
   $("#calNext").onclick = () => shiftMonth(1);
   $("#calToday").onclick = () => {
@@ -1172,7 +1528,10 @@ async function boot() {
   $("#deviceDot").className = "dot";
   $("#chipSub").textContent = "检测中…";
   await pingDevice();
-  switchView("stats");
+
+  // 按地址栏落地：支持 #stats/week/2026-11-23 这类深链，缺省落概览
+  const route = parseHash();
+  go(route.view, route.sub || "overview", route.arg || null);
 }
 
 boot();

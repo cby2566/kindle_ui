@@ -57,7 +57,15 @@
     </div>
 
     <section class="view is-active" id="view-stats">
-      <div class="range-bar">
+      <div class="subtabs" id="statsTabs" role="tablist">
+        <button data-sub="overview" class="is-on">概览</button>
+        <button data-sub="week">周</button>
+        <button data-sub="calendar">日历</button>
+        <button data-sub="day">单日</button>
+        <button data-sub="books">书籍</button>
+      </div>
+
+      <div class="range-bar" id="rangeBar">
         <div class="seg" id="rangeSeg">
           <button data-range="today">今天</button>
           <button data-range="week">本周</button>
@@ -68,98 +76,176 @@
         <span class="range-hint" id="rangeHint">—</span>
       </div>
 
-      <div class="kpis">
-        <div class="kpi">
-          <span class="kpi-label">阅读时长</span>
-          <b class="kpi-value" id="kpiTotal">—</b>
-          <span class="kpi-foot" id="kpiTotalFoot">—</span>
+      <div class="subview is-active" id="sub-overview">
+        <div class="kpis">
+          <div class="kpi">
+            <span class="kpi-label" id="kpiTotalLabel">累计阅读</span>
+            <b class="kpi-value" id="kpiTotal">—</b>
+            <span class="kpi-foot" id="kpiTotalFoot">—</span>
+          </div>
+          <div class="kpi">
+            <span class="kpi-label" id="kpiAvgLabel">日均阅读</span>
+            <b class="kpi-value" id="kpiAvg">—</b>
+            <span class="kpi-foot" id="kpiAvgFoot">—</span>
+          </div>
+          <div class="kpi">
+            <span class="kpi-label">阅读页数</span>
+            <b class="kpi-value" id="kpiPages">—</b>
+            <span class="kpi-foot" id="kpiPagesFoot">—</span>
+          </div>
+          <div class="kpi">
+            <span class="kpi-label">阅读天数</span>
+            <b class="kpi-value" id="kpiDays">—</b>
+            <span class="kpi-foot" id="kpiDaysFoot">—</span>
+          </div>
+          <div class="kpi">
+            <span class="kpi-label">平均速度</span>
+            <b class="kpi-value" id="kpiSpeed">—</b>
+            <span class="kpi-foot" id="kpiSpeedFoot">—</span>
+          </div>
         </div>
-        <div class="kpi">
-          <span class="kpi-label">翻页次数</span>
-          <b class="kpi-value" id="kpiPages">—</b>
-          <span class="kpi-foot" id="kpiPagesFoot">—</span>
-        </div>
-        <div class="kpi">
-          <span class="kpi-label">活跃天数</span>
-          <b class="kpi-value" id="kpiDays">—</b>
-          <span class="kpi-foot" id="kpiDaysFoot">—</span>
-        </div>
-        <div class="kpi">
-          <span class="kpi-label">平均速度</span>
-          <b class="kpi-value" id="kpiSpeed">—</b>
-          <span class="kpi-foot" id="kpiSpeedFoot">—</span>
+
+        <div class="grid-2">
+          <div class="card">
+            <div class="card-head">
+              <h2>每日时长</h2>
+              <span class="card-hint">近 30 天 · 柱=分钟 线=页数</span>
+            </div>
+            <div class="chart" id="dailyChart"></div>
+          </div>
+          <div class="card">
+            <div class="card-head">
+              <h2>时段偏好</h2>
+              <span class="card-hint" id="hourHint">累计 / 分钟</span>
+            </div>
+            <div class="chart" id="hourChart"></div>
+          </div>
         </div>
       </div>
 
-      <div class="card">
-        <div class="card-head">
-          <div>
-            <h2>日历视图</h2>
-            <p class="card-sub" id="calSummary">—</p>
-          </div>
-          <div class="cal-nav">
-            <button class="icon-btn" id="calPrev" aria-label="上个月">‹</button>
-            <b id="calTitle">—</b>
-            <button class="icon-btn" id="calNext" aria-label="下个月">›</button>
-            <button class="btn btn-mini" id="calToday">回到本月</button>
-          </div>
+      <div class="subview" id="sub-week">
+        <div class="week-nav">
+          <button class="icon-btn" id="wkPrev" aria-label="上一周">‹</button>
+          <b id="wkRange">—</b>
+          <span class="week-badge" id="wkIso">—</span>
+          <button class="icon-btn" id="wkNext" aria-label="下一周">›</button>
+          <button class="btn btn-mini" id="wkToday">回到本周</button>
         </div>
-        <div class="cal-weekhead" id="calWeekHead"></div>
-        <div class="cal-wrap">
-          <div class="cal-grid" id="calGrid"></div>
-          <div class="cal-spans" id="calSpans"></div>
-        </div>
-        <div class="cal-foot">
-          <div class="cal-legend" id="calLegend"></div>
-          <span class="cal-hint">每格底部 24 根细柱 = 该小时阅读量 · 彩色条 = 同一本书连续阅读跨天相连 · 每天最多 3 本</span>
-        </div>
-      </div>
 
-      <div class="card">
-        <div class="card-head">
-          <div>
-            <h2>时间轴</h2>
-            <p class="card-sub" id="tlSummary">—</p>
+        <div class="kpis">
+          <div class="kpi">
+            <span class="kpi-label">本周阅读</span>
+            <b class="kpi-value" id="wkTotal">—</b>
+            <span class="kpi-foot" id="wkTotalFoot">—</span>
           </div>
-          <div class="cal-nav">
-            <button class="icon-btn" id="tlPrev" aria-label="前一天">‹</button>
-            <b id="tlDate">—</b>
-            <button class="icon-btn" id="tlNext" aria-label="后一天">›</button>
-            <button class="btn btn-mini" id="tlToday">今天</button>
+          <div class="kpi">
+            <span class="kpi-label">日均</span>
+            <b class="kpi-value" id="wkAvg">—</b>
+            <span class="kpi-foot" id="wkAvgFoot">—</span>
+          </div>
+          <div class="kpi">
+            <span class="kpi-label">阅读页数</span>
+            <b class="kpi-value" id="wkPages">—</b>
+            <span class="kpi-foot" id="wkPagesFoot">—</span>
+          </div>
+          <div class="kpi">
+            <span class="kpi-label">阅读天数</span>
+            <b class="kpi-value" id="wkDays">—</b>
+            <span class="kpi-foot" id="wkDaysFoot">—</span>
+          </div>
+          <div class="kpi kpi-accent">
+            <span class="kpi-label">较上周</span>
+            <b class="kpi-value" id="wkDelta">—</b>
+            <span class="kpi-foot" id="wkDeltaFoot">—</span>
           </div>
         </div>
-        <div class="tl-wrap" id="tlWrap"></div>
-      </div>
 
-      <div class="grid-2">
         <div class="card">
           <div class="card-head">
-            <h2>每日时长</h2>
-            <span class="card-hint">近 30 天 · 柱=分钟 线=页数</span>
+            <div>
+              <h2>每日时长</h2>
+              <p class="card-sub" id="wkChartSub">—</p>
+            </div>
+            <span class="card-hint">柱=本周 · 虚线=上周同日</span>
           </div>
-          <div class="chart" id="dailyChart"></div>
+          <div class="chart chart-tall" id="weekChart"></div>
         </div>
+
         <div class="card">
           <div class="card-head">
-            <h2>时段偏好</h2>
-            <span class="card-hint" id="hourHint">累计 / 分钟</span>
+            <h2>逐日明细</h2>
+            <span class="card-hint">点某一行看那天的时间轴</span>
           </div>
-          <div class="chart" id="hourChart"></div>
+          <div class="week-days" id="weekDays"></div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <h2>本周书目</h2>
+            <span class="card-hint" id="wkBooksHint">—</span>
+          </div>
+          <div class="week-books" id="weekBooks"></div>
         </div>
       </div>
 
-      <div class="card">
-        <div class="card-head">
-          <h2>书籍排行</h2>
-          <span class="card-hint" id="booksHint"></span>
+      <div class="subview" id="sub-calendar">
+        <div class="card">
+          <div class="card-head">
+            <div>
+              <h2>日历视图</h2>
+              <p class="card-sub" id="calSummary">—</p>
+            </div>
+            <div class="cal-nav">
+              <button class="icon-btn" id="calPrev" aria-label="上个月">‹</button>
+              <b id="calTitle">—</b>
+              <button class="icon-btn" id="calNext" aria-label="下个月">›</button>
+              <button class="btn btn-mini" id="calToday">回到本月</button>
+            </div>
+          </div>
+          <div class="cal-weekhead" id="calWeekHead"></div>
+          <div class="cal-wrap">
+            <div class="cal-grid" id="calGrid"></div>
+            <div class="cal-spans" id="calSpans"></div>
+          </div>
+          <div class="cal-foot">
+            <div class="cal-legend" id="calLegend"></div>
+            <span class="cal-hint">每格底部 24 根细柱 = 该小时阅读量 · 彩色条 = 同一本书连续阅读跨天相连 · 每天最多 3 本</span>
+          </div>
         </div>
-        <div class="table-wrap">
-          <table class="table" id="booksTable">
-            <thead>
-              <tr><th class="col-rank">#</th><th>书名</th><th class="col-num">时长</th><th class="col-progress">进度</th><th class="col-date">最近阅读</th></tr>
-            </thead>
-            <tbody></tbody>
-          </table>
+      </div>
+
+      <div class="subview" id="sub-day">
+        <div class="card">
+          <div class="card-head">
+            <div>
+              <h2>时间轴</h2>
+              <p class="card-sub" id="tlSummary">—</p>
+            </div>
+            <div class="cal-nav">
+              <button class="icon-btn" id="tlPrev" aria-label="前一天">‹</button>
+              <b id="tlDate">—</b>
+              <button class="icon-btn" id="tlNext" aria-label="后一天">›</button>
+              <button class="btn btn-mini" id="tlToday">今天</button>
+            </div>
+          </div>
+          <div class="tl-wrap" id="tlWrap"></div>
+        </div>
+      </div>
+
+      <div class="subview" id="sub-books">
+        <div class="card">
+          <div class="card-head">
+            <h2>书籍排行</h2>
+            <span class="card-hint" id="booksHint"></span>
+          </div>
+          <div class="table-wrap">
+            <table class="table" id="booksTable">
+              <thead>
+                <tr><th class="col-rank">#</th><th>书名</th><th class="col-num">时长</th><th class="col-progress">进度</th><th class="col-date">最近阅读</th></tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
         </div>
       </div>
     </section>

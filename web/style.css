@@ -318,7 +318,7 @@ button, input { font: inherit; color: inherit; }
 
 .kpis {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 14px;
   margin-bottom: 14px;
 }
@@ -1136,3 +1136,123 @@ button, input { font: inherit; color: inherit; }
   .cal-wrap { overflow-x: auto; }
   .cal-grid, .cal-spans { min-width: 560px; }
 }
+
+/* ---------- 统计页子导航 ---------- */
+
+.subtabs {
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+  margin-bottom: 14px;
+}
+
+.subtabs button {
+  border: 0;
+  background: none;
+  padding: 7px 16px;
+  border-radius: 7px;
+  color: var(--muted);
+  font-size: 13px;
+  cursor: pointer;
+  transition: background .12s, color .12s;
+}
+
+.subtabs button:hover { color: var(--text); background: var(--panel-2); }
+
+.subtabs button.is-on {
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  font-weight: 500;
+}
+
+.subview { display: none; }
+.subview.is-active { display: block; }
+
+/* ---------- 周视图 ---------- */
+
+.week-nav { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; flex-wrap: wrap; }
+
+.week-nav b { font-size: 14px; font-weight: 500; }
+
+.week-badge {
+  font-size: 12px;
+  color: var(--muted);
+  background: var(--panel-2);
+  border-radius: 5px;
+  padding: 2px 8px;
+}
+
+.week-nav .btn-mini { margin-left: auto; }
+
+.kpi-accent { background: var(--accent-soft); border-color: transparent; }
+.kpi-accent .kpi-label { color: var(--accent-text); }
+.kpi-value.is-up { color: var(--accent-text); }
+.kpi-value.is-down { color: var(--muted); }
+
+.chart-tall { height: 260px; }
+
+.week-days { display: flex; flex-direction: column; }
+
+.week-day {
+  display: grid;
+  grid-template-columns: 128px 96px 76px minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
+  padding: 10px 6px;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+  cursor: pointer;
+  transition: background .12s;
+}
+
+.week-day:last-child { border-bottom: 0; }
+.week-day:hover { background: var(--panel-2); }
+.week-day.is-empty { color: var(--muted); cursor: default; }
+.week-day.is-empty:hover { background: none; }
+
+.wd-time, .wd-pages { font-variant-numeric: tabular-nums; }
+
+.wd-books {
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.week-books { display: flex; flex-direction: column; gap: 1px; }
+
+.week-book {
+  display: grid;
+  grid-template-columns: 10px minmax(0, 1.7fr) minmax(56px, 2fr) 76px 48px;
+  gap: 12px;
+  align-items: center;
+  padding: 7px 6px;
+  font-size: 13px;
+}
+
+.wb-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.wb-bar { height: 8px; background: var(--panel-2); border-radius: 4px; overflow: hidden; }
+
+.wb-bar i { display: block; height: 100%; background: var(--accent); border-radius: 4px; }
+
+.wb-num, .wb-share {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
+.wb-share { font-size: 12px; }
+
+@media (max-width: 900px) {
+  .week-day { grid-template-columns: 116px 74px minmax(0, 1fr); }
+  .week-day .wd-pages { display: none; }
+  .week-book { grid-template-columns: 10px minmax(0, 1.4fr) minmax(48px, 2fr) 64px; }
+  .week-book .wb-share { display: none; }
+}
+
+/* [hidden] 必须压得住各组件自己的 display，否则 .range-bar 之类会照常显示 */
+[hidden] { display: none !important; }
