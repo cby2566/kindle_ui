@@ -16,9 +16,12 @@
 时间戳是 Unix 秒，由设备按本地时区记录。
 """
 import csv
+import contextlib
 import datetime as dt
 import io
+import os
 import sqlite3
+import threading
 import time
 from pathlib import Path
 
@@ -39,9 +42,70 @@ RANGE_LABELS = {
     "all": "全部",
 }
 
+REMOTE_DB = "/mnt/us/koreader/settings/statistics.sqlite3"
+
+
+class _RWLock:
+    """读多写一：读可以并行，换缓存文件时独占。
+
+    为什么需要它：Windows 上只要还有别的线程开着这个文件，os.replace 就被拒绝
+    （WinError 5 / 32），靠重试追不上持续不断的读请求。让读者在查询期间持共享锁、
+    替换时持独占锁，替换就一定落在没人的窗口里。写者优先（waiting_writers），
+    免得刷新被源源不断的读请求饿死。
+    """
+
+    def __init__(self):
+        self._cond = threading.Condition()
+        self._readers = 0
+        self._writer = False
+        self._waiting_writers = 0
+
+    @contextlib.contextmanager
+    def read(self):
+        with self._cond:
+            while self._writer or self._waiting_writers:
+                self._cond.wait()
+            self._readers += 1
+        try:
+            yield
+        finally:
+            with self._cond:
+                self._readers -= 1
+                if not self._readers:
+                    self._cond.notify_all()
+
+    @contextlib.contextmanager
+    def write(self):
+        with self._cond:
+            self._waiting_writers += 1
+            try:
+                while self._writer or self._readers:
+                    self._cond.wait()
+                self._writer = True
+            finally:
+                self._waiting_writers -= 1
+        try:
+            yield
+        finally:
+            with self._cond:
+                self._writer = False
+                self._cond.notify_all()
+
 
 class StatsCache:
-    """本地统计库缓存。设备不可达时退化为只读缓存，保证离线也能看历史。"""
+    """本地统计库缓存。设备不可达时退化为只读缓存，保证离线也能看历史。
+
+    缓存文件是所有统计接口共用的，所以改写它必须原子：先下载到 .part，
+    校验通过再 os.replace 换上去。读者要么看到完整的旧库、要么看到完整的
+    新库，永远不会撞见写了一半的文件（那是之前 500 和「全 0」的根因）。
+    """
+
+    # 拉库是全进程唯一的写操作，串行化掉，避免并发刷新互相踩。
+    # 类属性：同一个进程里不管 new 几个 StatsCache，都共用这把锁。
+    _fetch_lock = threading.Lock()
+    _rw = _RWLock()              # 读查询共享、替换缓存独占
+    _replace_retries = 25        # 别的进程占着缓存时兜底重试
+    _replace_wait = 0.04
 
     def __init__(self):
         self.db_path = config.CACHE_DIR / "statistics.sqlite3"
@@ -50,6 +114,12 @@ class StatsCache:
         self.local = False          # 本地模式：只读缓存，完全不碰设备
         self.source = "cache"       # device = 本次真的连上设备拿了新库
         self.last_error = None
+        self.refreshing = False     # 此刻有请求正在拉库
+        self.db_error = None        # 缓存库本身读不出来（本地文件损坏）
+
+    @property
+    def part_path(self):
+        return Path(str(self.db_path) + ".part")
 
     def _file_mtime(self):
         try:
@@ -60,30 +130,125 @@ class StatsCache:
     def _clear_sidecars(self):
         """清掉 -wal / -shm / -journal。
 
-        下载会整体覆盖主库文件，若旧的 WAL 还留着，SQLite 会把过期的
-        增量回放到新库上，轻则读数错乱、重则报 malformed。
-        设备侧 KOReader 每次 insertDB 后都会关连接触发 checkpoint，
-        实测 statistics.sqlite3-wal 恒为 0 字节，所以只取主库足够。
+        只下载主库，若旧的 WAL 还留着，SQLite 会把过期增量回放到新库上，
+        轻则读数错乱、重则报 malformed。设备侧 KOReader 每次 insertDB 后
+        都会关连接触发 checkpoint，实测 -wal 恒为 0 字节，取主库就够。
+        Windows 上这些文件可能正被并发读请求开着，删不掉时重试几次就放过：
+        主库没换之前留着无害，换之后 SQLite 会按新库重建。
         """
         for suffix in ("-wal", "-shm", "-journal"):
-            try:
-                Path(str(self.db_path) + suffix).unlink()
-            except OSError:
-                pass
+            target = Path(str(self.db_path) + suffix)
+            for _ in range(3):
+                try:
+                    target.unlink()
+                    break
+                except FileNotFoundError:
+                    break
+                except OSError:
+                    time.sleep(0.02)
 
     def has_cache(self):
         return self.db_path.exists() and self.db_path.stat().st_size > 0
 
-    def ensure(self, kindle, max_age=90, force=False, local=False):
-        """拉取统计库。
+    def _is_fresh(self, max_age):
+        return self.has_cache() and (time.time() - self.fetched_at) < max_age
 
-        返回 (path, offline)。设备连不上但本地有缓存时不抛异常，
-        而是标记 offline=True 继续用缓存，历史数据照样能看。
+    def _validate(self, path):
+        """下载完先验一遍，再决定要不要换上去。
+
+        网络半途断掉时 paramiko 会抛异常，但断在协议边缘也可能落一个长度
+        不为 0 的残文件。这里查三样：非空、quick_check 通过、有 page_stat_data 表。
+        """
+        path = Path(path)
+        if path.stat().st_size <= 0:
+            raise DeviceError("统计库下载不完整：文件是空的")
+        con = sqlite3.connect("file:{}?mode=ro".format(path.as_posix()), uri=True)
+        try:
+            row = con.execute("PRAGMA quick_check").fetchone()
+            has_table = con.execute(
+                "SELECT 1 FROM sqlite_master WHERE name = 'page_stat_data'"
+            ).fetchone()
+        finally:
+            con.close()
+        if not row or row[0] != "ok":
+            raise DeviceError("统计库下载不完整：{}".format(row[0] if row else "校验无返回"))
+        if not has_table:
+            raise DeviceError("统计库下载不完整：缺少 page_stat_data 表")
+
+    def _replace(self, part):
+        """把校验过的副本换到 db_path。"""
+        error = None
+        for _ in range(self._replace_retries):
+            try:
+                os.replace(part, self.db_path)
+                return
+            except OSError as exc:          # Windows：旧库正被读请求打开
+                error = exc
+                time.sleep(self._replace_wait)
+        raise DeviceError("统计库替换失败（本地缓存文件被占用）：{}".format(error))
+
+    def _fetch(self, kindle):
+        """下载 → 校验 → 原子替换。任何一步失败都保留原缓存不动。
+
+        返回本次结果 (source, offline, cache_error)，供 ensure() 组装响应——
+        直接从共享属性读会被并发请求互相覆盖。
+        """
+        timeout = 4 if self.has_cache() else 8
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        part = self.part_path
+        try:
+            kindle.download(REMOTE_DB, part, timeout=timeout)
+            self._validate(part)
+        except Exception as exc:
+            try:
+                part.unlink()
+            except OSError:
+                pass
+            if not self.has_cache():
+                raise DeviceError(
+                    "设备未连接，且本地还没有统计缓存。请先连上设备读取一次，"
+                    "之后即使断开也能查看历史数据。"
+                ) from exc
+            self.offline = True
+            self.source = "cache"
+            self.last_error = str(exc) or exc.__class__.__name__
+            self.fetched_at = self._file_mtime()
+            return "cache", True, self.last_error
+        with self._rw.write():
+            self._clear_sidecars()
+            self._replace(part)
+            self._clear_sidecars()
+        self.fetched_at = time.time()
+        self.offline = False
+        self.source = "device"
+        self.last_error = None
+        self.db_error = None
+        return "device", False, None
+
+    def _result(self, source, offline, cache_error, local=None):
+        """本次调用的结果快照（不读会被并发请求改写的 source/offline/local）。"""
+        return {
+            "path": str(self.db_path),
+            "source": source,
+            "offline": offline,
+            "local": self.local if local is None else local,
+            "refreshing": self.refreshing,
+            "cached_at": int(self.fetched_at) if self.fetched_at else None,
+            "cache_error": cache_error,
+            "db_error": self.db_error,
+        }
+
+    def ensure(self, kindle, max_age=90, force=False, local=False):
+        """拉取统计库，返回**本次调用**的结果（含 path / source / offline 等）。
+
+        设备连不上但本地有缓存时不抛异常，而是标记 offline=True 继续用缓存，
+        历史数据照样能看。
 
         local=True 时彻底跳过设备：只读本地缓存，不再探活、不再下载。
         适用于「手头没有设备、只想翻历史」的场景，省掉每次都干等超时。
         """
         self.local = bool(local)
+        self.refreshing = False
         if local:
             if not self.has_cache():
                 raise DeviceError(
@@ -94,101 +259,83 @@ class StatsCache:
             self.source = "local"
             self.last_error = None
             self.fetched_at = self._file_mtime()
-            return self.db_path
+            return self._result("local", False, None, local=True)
 
-        fresh = self.has_cache() and (time.time() - self.fetched_at) < max_age
-        if fresh and not force:
+        if self._is_fresh(max_age) and not force:
             self.offline = False
             self.source = "cache"
-            return self.db_path
+            self.last_error = None
+            return self._result("cache", False, None)
 
-        # 已有缓存时缩短连接超时，避免离线启动干等
-        timeout = 4 if self.has_cache() else 8
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            kindle.download("/mnt/us/koreader/settings/statistics.sqlite3",
-                            self.db_path, timeout=timeout)
-        except Exception as exc:
-            if not self.has_cache():
-                raise DeviceError(
-                    "设备未连接，且本地还没有统计缓存。请先连上设备读取一次，"
-                    "之后即使断开也能查看历史数据。"
-                ) from exc
-            self.offline = True
-            self.source = "cache"
-            self.last_error = str(exc) or exc.__class__.__name__
-            self.fetched_at = self._file_mtime()
-            return self.db_path
-
-        self.fetched_at = time.time()
-        self.offline = False
-        self.source = "device"
-        self.last_error = None
-        self._clear_sidecars()
-        return self.db_path
+        before = self._file_mtime()
+        with self._fetch_lock:
+            # 等锁期间别人可能已经拉完并换过文件，别重复下一遍
+            if (self.has_cache() and self._file_mtime() != before) or \
+                    (not force and self._is_fresh(max_age)):
+                self.offline = False
+                self.source = "cache"
+                self.last_error = None
+                self.fetched_at = self._file_mtime()
+                return self._result("cache", False, None)
+            self.refreshing = True
+            try:
+                source, offline, error = self._fetch(kindle)
+            finally:
+                self.refreshing = False
+        return self._result(source, offline, error)
 
     def _connect(self):
         return sqlite3.connect("file:{}?mode=ro".format(self.db_path.as_posix()), uri=True)
 
-    def snapshot(self, range_key="all"):
+    def _read(self, builder, empty):
+        """读缓存库。本地文件坏掉时不再抛 500，退回空结构并记下原因。
+
+        有原子替换兜底后这条路径基本不会命中；留着是为了万一本机磁盘层面
+        坏掉时，界面能说清「缓存库坏了」，而不是整页 500。
+        """
         if not self.db_path.exists():
-            return empty_snapshot(range_key)
+            return empty()
         try:
-            con = self._connect()
-            try:
-                data = build_snapshot(con, range_key)
-            finally:
-                con.close()
-        except sqlite3.Error:
-            return empty_snapshot(range_key)
+            with self._rw.read():
+                con = self._connect()
+                try:
+                    data = builder(con)
+                finally:
+                    con.close()
+        except sqlite3.Error as exc:
+            self.db_error = str(exc) or exc.__class__.__name__
+            data = empty()
+            data["db_error"] = self.db_error
+            return data
+        self.db_error = None
+        return data
+
+    def snapshot(self, range_key="all"):
+        data = self._read(lambda con: build_snapshot(con, range_key),
+                          lambda: empty_snapshot(range_key))
         data["fetched_at"] = int(self.fetched_at)
         data["age_sec"] = int(time.time() - self.fetched_at)
         return data
 
     def calendar(self, year, month):
-        if not self.db_path.exists():
-            return empty_calendar(year, month)
-        con = self._connect()
-        try:
-            return build_calendar(con, year, month)
-        finally:
-            con.close()
+        return self._read(lambda con: build_calendar(con, year, month),
+                          lambda: empty_calendar(year, month))
 
     def day(self, date):
-        if not self.db_path.exists():
-            return empty_day(date)
-        con = self._connect()
-        try:
-            return build_day(con, date)
-        finally:
-            con.close()
+        return self._read(lambda con: build_day(con, date),
+                          lambda: empty_day(date))
 
     def week(self, start):
-        if not self.db_path.exists():
-            return empty_week(start)
-        con = self._connect()
-        try:
-            return build_week(con, start)
-        finally:
-            con.close()
+        return self._read(lambda con: build_week(con, start),
+                          lambda: empty_week(start))
 
     def insights(self, range_key="all"):
-        if not self.db_path.exists():
-            return empty_insights(range_key)
-        con = self._connect()
-        try:
-            return build_insights(con, range_key)
-        finally:
-            con.close()
+        return self._read(lambda con: build_insights(con, range_key),
+                          lambda: empty_insights(range_key))
 
     def sessions(self, period="7d", book=None, limit=500):
-        if not self.db_path.exists():
-            return empty_sessions(period)
-        con = self._connect()
-        try:
-            return build_sessions(con, period, book, limit)
-        finally:
-            con.close()
+        return self._read(lambda con: build_sessions(con, period, book, limit),
+                          lambda: empty_sessions(period))
 
 
 # ---------- 通用 ----------

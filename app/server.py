@@ -73,12 +73,15 @@ def discover(payload: dict = Body(default={})):
 @app.get("/api/stats")
 def get_stats(range: str = "all", refresh: int = 0, local: int = 0):
     k = dev.Kindle()
-    CACHE.ensure(k, force=bool(refresh), local=bool(local))
+    # 用本次调用返回的状态，而不是全局属性：并发请求会互相覆盖 source，
+    # 刚刷新完的响应可能被改写成「取自缓存」。
+    state = CACHE.ensure(k, force=bool(refresh), local=bool(local))
+    state.pop("path", None)
     if range not in stats.RANGE_LABELS:
         raise HTTPException(400, "不支持的时间范围：{}".format(range))
     data = CACHE.snapshot(range)
     data["host"] = k.host
-    data.update(_cache_state())
+    data.update(state)
     return data
 
 
@@ -89,6 +92,8 @@ def _cache_state():
         "source": CACHE.source,
         "cached_at": int(CACHE.fetched_at) if CACHE.fetched_at else None,
         "cache_error": CACHE.last_error,
+        "refreshing": CACHE.refreshing,
+        "db_error": CACHE.db_error,
     }
 
 
@@ -165,14 +170,32 @@ def get_sessions(period: str = "7d", book: int = 0, limit: int = 500):
 
 
 @app.get("/api/stats/sessions/export")
-def export_sessions(period: str = "7d", book: int = 0):
-    """整份清单导出成 CSV，不受列表的条数上限影响。"""
+def export_sessions(period: str = "7d", book: int = 0, save: int = 0):
+    """整份清单导出成 CSV，不受列表的条数上限影响。
+
+    save=1 时直接写进 data/exports/ 并返回真实路径。窗口模式下走浏览器下载
+    会弹系统保存框、前端拿不到结果，这个口子让「导出」有确定的回执。
+    """
     p, b = _session_args(period, book)
+    data = CACHE.sessions(p, b, limit=None)
+    text = stats.sessions_csv(data)
     name = "kwp-sessions-{}.csv".format(dt.date.today().strftime("%Y%m%d"))
+    if save:
+        out_dir = config.DATA_DIR / "exports"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        target = out_dir / name
+        target.write_text(text, encoding="utf-8")
+        return {
+            "path": str(target),
+            "name": name,
+            "rows": len(data["sessions"]),
+            "seconds": data["seconds"],
+        }
     return Response(
-        content=stats.sessions_csv(CACHE.sessions(p, b, limit=None)),
+        content=text,
         media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": 'attachment; filename="{}"'.format(name),
+                 "X-Kwp-Rows": str(len(data["sessions"])),
                  "Cache-Control": "no-store"},
     )
 

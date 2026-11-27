@@ -9,9 +9,8 @@ Kindle Paperwhite 3 的本地管理面板：阅读统计可视化、书库管理
 pip install -r requirements.txt
 ```
 
-后端复用 `../kwp3_tools/script/kindle_ssh.py`（已内置 KOReader dropbear 的
-主机密钥与空密码适配），不复制 SSH 逻辑。若目录结构不同，用环境变量
-`KWP3_SCRIPT_DIR` 指向那个 `script` 目录。
+SSH 逻辑在自己的 `app/kindle_ssh.py` 里（已内置 KOReader dropbear 的主机密钥与
+空密码适配），不引用外部目录，克隆下来装完依赖即可运行；要改 SSH 细节只改这一份。
 
 ## 运行
 
@@ -51,6 +50,11 @@ python run.py --host 192.168.31.215
 注意：如果**从未成功连接过**，本地没有缓存，此时读统计会返回 503 并提示先连一次设备。
 书库和设备两个页面本质上需要实时访问，离线时不可用。
 
+拉库是**原子**的：先下到 `statistics.sqlite3.part`，校验（非空、`PRAGMA quick_check`
+通过、含 `page_stat_data` 表）之后才 `os.replace` 换上去，并且整段拉库用一把进程内
+锁串行化。所以刷新途中去翻别的页不会读到写了一半的库（以前会 500 或显示「累计 0 分钟」），
+拉库失败也不会毁掉原缓存 —— 旧库原地不动，只记一条 `cache_error`。
+
 离线判断加了 TCP 探活（3 秒超时），否则 Windows 的 SYN 重试要 21 秒才报错，
 界面会长时间转圈。
 
@@ -86,5 +90,8 @@ run.py           启动入口
 ## 注意事项
 
 - 所有路径限定在 `/mnt/us` 下，删除操作有二次确认，受保护目录直接拒绝
+- 窗口模式支持下载：pywebview 的 `ALLOW_DOWNLOADS` 默认关着、会把下载静默取消，
+  `run.py` 里已显式打开。导出 CSV 由后端写进 `data/exports/` 并在提示里回报文件名；
+  书库下载会弹系统保存框
 - 电量数据来自 `/sys/class/power_supply/max77696-battery/`，别的机型可能不同
 - 3.0.35 内核没有 `MemAvailable`，可用内存按 `MemFree + Buffers + Cached` 估算

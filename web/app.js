@@ -479,12 +479,22 @@ function reloadCurrent(force = true) {
 
 /* ---------- 阅读统计：概览 ---------- */
 
+let dbErrorShown = "";
+
 /**
  * 任何统计接口返回都带 source/offline/cached_at，统一在这里同步在线状态。
  * 否则深链直接进周页、日历页时，从没请求过 /api/stats，横幅就一直误报。
  */
 function syncOfflineState(data) {
   if (!data) return;
+  if (data.db_error) {
+    if (data.db_error !== dbErrorShown) {
+      dbErrorShown = data.db_error;
+      toast(`本地缓存库读不出来：${data.db_error}`, "err");
+    }
+  } else if (dbErrorShown) {
+    dbErrorShown = "";
+  }
   if (data.cached_at) state.cachedAt = data.cached_at;
   if (data.source === "local") {
     state.cacheOffline = false;
@@ -1476,15 +1486,22 @@ function paintSessions() {
     : "";
 }
 
-/** 清单由后端整份生成 CSV，不受列表的条数上限影响。 */
-function exportSessions() {
-  const a = document.createElement("a");
-  a.href = `/api/stats/sessions/export?${sessionsQuery().toString()}`;
-  a.download = "";
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  toast("已开始导出 CSV", "ok");
+/** 清单由后端整份生成 CSV。走 save=1 让后端落盘并回真实路径，
+ *  这样提示里说的是「确实写成了」，而不是「已开始导出」。 */
+async function exportSessions() {
+  const q = sessionsQuery();
+  q.set("save", "1");
+  try {
+    const res = await fetch(`/api/stats/sessions/export?${q.toString()}`);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      toast(data.detail || `导出失败（HTTP ${res.status}）`, "err");
+      return;
+    }
+    toast(`已导出 ${data.rows} 次阅读 → data/exports/${data.name}`, "ok");
+  } catch (err) {
+    toast(`导出失败：${err.message}`, "err");
+  }
 }
 
 /* ---------- 书库 ---------- */
@@ -1597,7 +1614,7 @@ function paintFiles(entries) {
 
 function downloadFile(remote) {
   const name = remote.split("/").pop();
-  toast(`开始下载 ${name}`, "ok");
+  toast(`已请求下载 ${name}`, "ok");
   const a = document.createElement("a");
   a.href = `/api/files/download?path=${encodeURIComponent(remote)}`;
   a.download = name;

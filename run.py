@@ -62,6 +62,9 @@ def main():
         thread.join()
         return
 
+    # pywebview 6.x 默认 ALLOW_DOWNLOADS=False，WebView2 会把下载直接取消，
+    # 书库下载和「导出 CSV」都会静默失败。这里显式打开（Windows 上会弹系统保存框）。
+    webview.settings["ALLOW_DOWNLOADS"] = True
     webview.create_window("KWP UI", url, width=1280, height=860, min_size=(980, 660))
     webview.start()
     server.should_exit = True
