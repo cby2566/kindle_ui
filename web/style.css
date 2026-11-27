@@ -1418,3 +1418,40 @@ button, input { font: inherit; color: inherit; }
   .sess-head, .sess-row { grid-template-columns: 96px 108px minmax(0, 1fr) 80px; }
   .sess-head .is-num:last-child, .sess-pages { display: none; }
 }
+
+/* ---------- 等待态 ---------- */
+
+/* 遮罩、文案归我们；转动的点由 SpinKit（vendor/spinkit.min.css）负责 */
+.subview { position: relative; }
+
+.subview.is-loading { min-height: 300px; }
+
+.loading-veil {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  background: color-mix(in srgb, var(--bg) 90%, transparent);
+  cursor: progress;
+}
+
+.loading-veil .sk-chase {
+  --sk-size: 30px;
+  --sk-color: var(--accent);
+  /* 铺图会把主线程占死几百毫秒，提到独立图层让这几个点继续转 */
+  will-change: transform;
+}
+
+.loading-text {
+  margin: 0;
+  font-size: 13px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+

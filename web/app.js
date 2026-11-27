@@ -306,6 +306,8 @@ function applySub(sub, arg) {
       state.calMonth = { year: y, month: m };
     }
     if (!state.loaded.stats) {
+      // 缓存还没确认过时，loadStats 可能要去设备拉库，这段空白也遮上
+      showLoading($("#sub-calendar"), "正在读取阅读记录…");
       loadStats().then(() => loadCalendar(state.calMonth && state.calMonth.year,
                                           state.calMonth && state.calMonth.month));
     } else {
@@ -313,8 +315,12 @@ function applySub(sub, arg) {
     }
   } else if (sub === "day") {
     if (arg && /^\d{4}-\d{2}-\d{2}$/.test(arg)) state.selectedDate = arg;
-    if (!state.loaded.stats) loadStats().then(() => loadDay(state.selectedDate));
-    else loadDay(state.selectedDate);
+    if (!state.loaded.stats) {
+      showLoading($("#sub-day"), "正在读取阅读记录…");
+      loadStats().then(() => loadDay(state.selectedDate));
+    } else {
+      loadDay(state.selectedDate);
+    }
   }
 }
 
@@ -731,11 +737,14 @@ function fmtMD(iso) {
 }
 
 async function loadWeek(start) {
+  const host = $("#sub-week");
+  showLoading(host, "正在读取这一周的记录…");
   try {
     const data = await api(`/api/stats/week${start ? `?start=${start}` : ""}`);
     state.week = data;
     state.weekStart = data.start;
     syncOfflineState(data);
+    await nextFrame();
     paintWeek(data);
     const want = buildHash("stats", "week", data.start);
     if (state.view === "stats" && state.sub === "week" && location.hash !== want) {
@@ -744,8 +753,11 @@ async function loadWeek(start) {
     setTimeout(() => {
       if (state.charts.weekChart) state.charts.weekChart.resize();
     }, 30);
+    await nextFrame();
   } catch (err) {
     toast(err.message, "err");
+  } finally {
+    hideLoading(host);
   }
 }
 
@@ -938,13 +950,19 @@ async function loadCalendar(year, month) {
     year = state.calMonth.year;
     month = state.calMonth.month;
   }
+  const host = $("#sub-calendar");
+  showLoading(host, `正在读取 ${year} 年 ${month} 月…`);
   try {
     const data = await api(`/api/stats/calendar?month=${year}-${String(month).padStart(2, "0")}`);
     state.calendar = data;
     syncOfflineState(data);
+    await nextFrame();
     paintCalendar(data);
+    await nextFrame();
   } catch (err) {
     toast(err.message, "err");
+  } finally {
+    hideLoading(host);
   }
 }
 
@@ -1079,18 +1097,91 @@ async function selectDate(date) {
   await loadDay(date);
 }
 
+/* ---------- 等待态 ---------- */
+
+/* 转动的点由 SpinKit 提供，这里只管挂哪、说什么 */
+const SPIN_CHASE_DOTS = Array.from({ length: 6 }, () => '<div class="sk-chase-dot"></div>').join("");
+
+function veilOf(host) {
+  let veil = host.querySelector(":scope > .loading-veil");
+  if (!veil) {
+    veil = document.createElement("div");
+    veil.className = "loading-veil";
+    veil.hidden = true;
+    veil.innerHTML = `<div class="sk-chase">${SPIN_CHASE_DOTS}</div>
+      <p class="loading-text"></p>`;
+    host.appendChild(veil);
+  }
+  return veil;
+}
+
+function showLoading(host, text) {
+  if (!host) return;
+  const veil = veilOf(host);
+  veil.querySelector(".loading-text").textContent = text || "正在读取…";
+  veil.hidden = false;
+  host.classList.add("is-loading");
+  host.setAttribute("aria-busy", "true");
+}
+
+function hideLoading(host) {
+  if (!host) return;
+  const veil = host.querySelector(":scope > .loading-veil");
+  if (veil) veil.hidden = true;
+  host.classList.remove("is-loading");
+  host.removeAttribute("aria-busy");
+}
+
+/* 等「这一帧真的画完了」再往下走，必须两个 rAF：
+   第一个 rAF 的回调跑在绘制之前，回调里再排一个 setTimeout 也可能抢在绘制前执行，
+   等于没等。两个 rAF 之间必定跨过一次真实绘制。
+   这一点对 vis-timeline 尤其要紧——它的构造函数会一口气卡住 200~500ms，
+   遮罩若没抢在那之前上屏，主人看到的就是「先空白、后 loading」。 */
+const nextFrame = () => new Promise((resolve) => {
+  requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+});
+
+/* vis-timeline 分两阶段长：先轴和网格，隔一会儿才把条目摆上去。
+   它画完会发一次 changed（实测正常速度 8ms、6 倍降速 60ms 后到），
+   等这个事件，比盯 .vis-item 有没有宽高体面，也不依赖库的内部类名。
+   万一事件没来（例如空数据），超时兜底，绝不把界面锁死。 */
+function whenTimelineReady(timeline, timeout = 1200) {
+  if (!timeline || typeof timeline.on !== "function") return Promise.resolve();
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      timeline.off("changed", finish);
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(finish, timeout);
+    timeline.on("changed", finish);
+  });
+}
+
 /* ---------- 时间轴（手写） ---------- */
 
 async function loadDay(date) {
   if (!date) date = state.selectedDate || isoOf(new Date());
   state.selectedDate = date;
+  const host = $("#sub-day");
+  showLoading(host, `正在读取 ${fmtMD(date)} 的阅读记录…`);
   try {
     const data = await api(`/api/stats/day?date=${date}`);
     state.day = data;
     syncOfflineState(data);
+    await nextFrame();      // 遮罩先上屏，再去铺时间轴（那一步是同步的，会卡住主线程）
     paintTimeline(data);
+    // 有柱子要画就等库把它画完；空日子本来就没有条目，不必等
+    const bars = (data.books || []).reduce((n, b) => n + (b.periods ? b.periods.length : 0), 0);
+    if (bars) await whenTimelineReady(state.timeline);
+    await nextFrame();      // 让新内容先画出来，遮罩再撤：中间不留白
   } catch (err) {
     toast(err.message, "err");
+  } finally {
+    hideLoading(host);
   }
 }
 
