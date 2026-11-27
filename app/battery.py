@@ -300,11 +300,14 @@ def rebuild_cycles(con):
 
 
 def _new_cycle(row):
-    """开新周期。awake/sleeping 的百分比累计量自 reset 从 0 计，首行
-    采样到的值天然属于本周期（时长没法往前追，置 0、由 boundary 误差吸收）。"""
+    """开新周期。百分比与时长同取 lua 累计值——两组字段同源（插电时一起
+    reset），只取百分比而把时长置 0，首条快照就会出现「清醒 19% / 0 分钟」
+    的自相矛盾。start_ts 仍是采样时刻，「周期天数」按本机观测窗口计，
+    与这里的设备口径本来就是两回事，界面已注明「约」。"""
     return {
         "start_ts": row["ts"],
-        "awake_sec": 0, "sleeping_sec": 0,
+        "awake_sec": _sec(row.get("awake_us")),
+        "sleeping_sec": _sec(row.get("sleeping_us")),
         "awake_pct": row.get("awake_pct") or 0,
         "sleeping_pct": row.get("sleeping_pct") or 0,
         "discharge_pct": row.get("discharging_pct") or 0,
@@ -400,10 +403,12 @@ class BatteryStore:
             inserted, old_inserted = 0, 0
             # 去重看库里最后一行：指纹相同且距上次入库不足窗口 → 跳过。
             # 从 DB 推导而不是内存变量：服务重启后窗口依然成立
+            # 只与 main 的最后一行比：.old 行的 id 更大、指纹必然不同，
+            # 拿它比对会让「内容未变的 main」被判成新数据而重复入库
             last = con.execute(
-                "SELECT ts, fingerprint FROM snapshot ORDER BY id DESC LIMIT 1").fetchone()
-            fresh = not (last and last["fingerprint"] == fp
-                         and source_time - last["ts"] < DEDUP_WINDOW_SEC)
+                "SELECT ts FROM snapshot WHERE source='main' "
+                "ORDER BY id DESC LIMIT 1").fetchone()
+            fresh = not (last and source_time - last["ts"] < DEDUP_WINDOW_SEC)
             if fresh:
                 self._insert(con, source_time, "main", fp, sysfs, uptime,
                              parsed, consistent and 1 or 0, lua_text)
@@ -522,7 +527,9 @@ class BatteryStore:
 
             if cycle is not None:
                 dur = (stat["m"] or cycle["start_ts"]) - cycle["start_ts"]
-                days = round(dur / 86400.0, 1) if dur else None
+                # 不足一小时的观测窗口不声称「几天」：首次同步当天，
+                # 清醒/睡眠时长来自设备累计，而本机还没真正观测过一夜
+                days = round(dur / 86400.0, 1) if dur >= 3600 else None
                 discharge = cycle["discharge_pct"] or 0
                 out["cycle"] = {
                     "start_ts": cycle["start_ts"],
@@ -634,7 +641,7 @@ def _per_hour(pct, us):
 
 def _cycle_payload(r):
     dur = (r["end_ts"] or int(time.time())) - r["start_ts"]
-    days = round(dur / 86400.0, 2) if dur > 0 else None
+    days = round(dur / 86400.0, 2) if dur >= 3600 else None
     discharge = r["discharge_pct"] or 0
     row = dict(r)
     row.pop("_chg_base_us", None)

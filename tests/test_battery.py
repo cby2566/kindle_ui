@@ -156,6 +156,11 @@ class TestIngestAndDedup(unittest.TestCase):
         rows = self.store.snapshots(10)["snapshots"]
         self.assertEqual(rows[0]["source"], "old")
         self.assertEqual(rows[1]["source"], "main")
+        # 回归：库里已有 .old 行时，内容未变的 main 仍须被去重
+        # （去重若拿全表最后一行比对，会因 old 指纹不同而重复入库）
+        r2 = self.store.ingest(main_now, REAL_OLD, SYSFS, 100.0, source_time=2100)
+        self.assertTrue(r2["deduped"])
+        self.assertEqual(r2["snapshot_count"], 2)
 
     def test_ingest_rejects_unparseable(self):
         from app.device import DeviceError
@@ -238,8 +243,8 @@ class TestCycleRebuild(unittest.TestCase):
         rebuild_cycles(self.con)
         row = self.con.execute("SELECT * FROM cycle").fetchone()
         self.assertEqual(row["closed"], 0)
-        self.assertEqual(row["awake_sec"], 2000)             # (5e9-3e9)/1e6
-        self.assertEqual(row["sleeping_sec"], 1600)
+        self.assertEqual(row["awake_sec"], 5000)             # 首行 3e9 基数 + 增量 2e9
+        self.assertEqual(row["sleeping_sec"], 2200)          # 首行 0.6e9 基数 + 增量 1.6e9
         self.assertEqual(row["awake_pct"], 5)                # 首行基数 3 + 增量 2
         self.assertEqual(row["discharge_pct"], 8)
         self.assertEqual(row["snapshots"], 2)
