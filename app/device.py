@@ -194,7 +194,7 @@ cat /sys/class/power_supply/max77696-battery/status 2>/dev/null
 echo '@@kindle'; cat /etc/prettyversion.txt 2>/dev/null
 echo '@@kernel'; uname -r
 echo '@@ko'; cat /mnt/us/koreader/git-rev 2>/dev/null
-echo '@@mem'; grep -E 'MemTotal|MemAvailable|MemFree' /proc/meminfo 2>/dev/null
+echo '@@mem'; grep -E 'MemTotal|MemAvailable|MemFree|Buffers|^Cached' /proc/meminfo 2>/dev/null
 echo '@@df'; df -k /mnt/us 2>/dev/null | tail -1
 echo '@@usid'; cat /proc/usid 2>/dev/null; echo
 echo '@@epoch'; date +%s; echo
@@ -241,8 +241,12 @@ echo '@@epoch'; date +%s; echo
             parts = line.split(":")
             if len(parts) == 2:
                 mem[parts[0].strip()] = int(parts[1].strip().split()[0]) // 1024
-        # 3.0.35 内核没有 MemAvailable，退回 MemFree
-        available = mem.get("MemAvailable", mem.get("MemFree", 0))
+        # 3.0.35 内核不提供 MemAvailable，按 Linux 的估算口径自己拼：
+        # 空闲 + Buffers + Cached，这部分缓存随时可回收，才算「真正可用」
+        if "MemAvailable" in mem:
+            available = mem["MemAvailable"]
+        else:
+            available = mem.get("MemFree", 0) + mem.get("Buffers", 0) + mem.get("Cached", 0)
 
         storage = None
         df_line = first("df")
@@ -277,7 +281,7 @@ echo '@@epoch'; date +%s; echo
             "online": True,
             "latency_ms": latency_ms,
             "model": model,
-            "serial": (serial[:4] + "****" + serial[-2:]) if len(serial) > 6 else "",
+            "serial": serial,
             "firmware": first("kindle", "未知").replace("(~~otaVersion~~)", "").strip(),
             "kernel": first("kernel"),
             "koreader": first("ko", "未安装"),
@@ -286,6 +290,7 @@ echo '@@epoch'; date +%s; echo
             "charging": charging,
             "memory": {
                 "total_mb": mem.get("MemTotal", 0),
+                "free_mb": mem.get("MemFree", 0),
                 "available_mb": available,
             },
             "storage": storage,

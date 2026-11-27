@@ -82,4 +82,4 @@ run.py           启动入口
 
 - 所有路径限定在 `/mnt/us` 下，删除操作有二次确认，受保护目录直接拒绝
 - 电量数据来自 `/sys/class/power_supply/max77696-battery/`，别的机型可能不同
-- 3.0.35 内核没有 `MemAvailable`，可用内存回退为 `MemFree`
+- 3.0.35 内核没有 `MemAvailable`，可用内存按 `MemFree + Buffers + Cached` 估算
