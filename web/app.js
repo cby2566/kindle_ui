@@ -12,7 +12,7 @@ const state = {
   host: "",
   port: 2222,
   path: "/mnt/us/documents",
-  range: "all",
+  range: "week",           // 默认看本周；概览与洞察共用
   calMonth: null,          // {year, month}
   selectedDate: null,      // 'YYYY-MM-DD'
   weekStart: null,         // 'YYYY-MM-DD'，该周周一
