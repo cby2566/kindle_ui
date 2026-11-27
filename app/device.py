@@ -300,15 +300,38 @@ def safe_path(path):
 
 # ---------- 局域网扫描 ----------
 
+def _decode_banner(raw):
+    """SSH 识别串一般是 ASCII，但个别设备会带本地编码的设备名。"""
+    raw = raw.strip()
+    if not raw:
+        return ""
+    text = ""
+    for enc in ("utf-8", "gbk", "latin-1"):
+        try:
+            text = raw.decode(enc)
+            break
+        except UnicodeDecodeError:
+            continue
+    return "".join(ch for ch in text if ch.isprintable()).strip()
+
+
+def _software_of(banner):
+    """SSH-2.0-dropbear_2026.92 (KOReader) -> dropbear_2026.92 (KOReader)"""
+    parts = banner.split("-", 2)
+    return parts[2].strip() if len(parts) == 3 else banner
+
+
 async def _probe(host, port, timeout):
     try:
         reader, writer = await asyncio.wait_for(
             asyncio.open_connection(host, port), timeout=timeout)
     except Exception:
         return None
-    banner = b""
+    line = b""
     try:
-        banner = await asyncio.wait_for(reader.read(64), timeout=timeout)
+        # 只读第一行：banner 之后紧跟的 SSH 二进制密钥交换包，
+        # 一起读进来按文本解码就会变成一堆乱码
+        line = await asyncio.wait_for(reader.readline(), timeout=timeout)
     except Exception:
         pass
     finally:
@@ -317,11 +340,11 @@ async def _probe(host, port, timeout):
             await writer.wait_closed()
         except Exception:
             pass
-    text = banner.decode("utf-8", "replace").strip()
+    text = _decode_banner(line)
     # 只认 SSH 服务，避免把开放 2222 的别的服务当成 Kindle
     if not text.startswith("SSH-"):
         return None
-    return {"host": host, "banner": text}
+    return {"host": host, "banner": text, "software": _software_of(text)}
 
 
 def _subnet_of(host):

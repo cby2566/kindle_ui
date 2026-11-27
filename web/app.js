@@ -703,7 +703,7 @@ async function scanDevices() {
     res.found.forEach((f) => {
       const row = document.createElement("div");
       row.className = "scan-item";
-      row.innerHTML = `<div><code>${f.host}</code><br><small>${escapeHtml(f.banner)}</small></div>`;
+      row.innerHTML = `<div><code>${f.host}</code><br><small>${escapeHtml(f.software || f.banner)}</small></div>`;
       const use = button("使用此设备", "btn btn-mini btn-primary", async () => {
         $("#hostInput").value = f.host;
         await saveHost();
