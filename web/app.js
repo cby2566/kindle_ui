@@ -371,7 +371,10 @@ function paintActions() {
   } else if (state.view === "device") {
     box.appendChild(button("重新读取", "btn btn-primary", () => loadStatus(true)));
   } else if (state.view === "battery") {
-    box.appendChild(button("立即同步", "btn btn-primary", () => sampleBattery(false)));
+    // 本地模式下「立即同步」无事可做，只留纯本地的重建
+    if (!state.local) {
+      box.appendChild(button("立即同步", "btn btn-primary", () => sampleBattery(false)));
+    }
     box.appendChild(button("重建周期", "btn", async () => {
       try {
         const r = await api("/api/battery/rebuild", { method: "POST" });
@@ -1810,6 +1813,9 @@ function fmtAgo(ts) {
  * 采样受后端 120 秒节流保护，频繁切页面不会反复连设备。
  */
 async function loadBattery() {
+  // 本地模式下状态条的「立即同步」点不出结果（红线：不连设备），直接收起
+  const syncBtn = $("#btnBatSync");
+  if (syncBtn) syncBtn.hidden = state.local;
   $("#pageSub").textContent = state.local
     ? "本地模式 · 只读电池历史，不连接设备"
     : "电池数据 · 每次进入自动补采一次";
@@ -1840,7 +1846,9 @@ async function sampleBattery(silent = true) {
     const r = await api("/api/battery/sample", { method: "POST" });
     const note = $("#batSyncAt");
     if (r.throttled) {
-      if (note) note.textContent = `${note.textContent}（节流中，未连设备）`;
+      // 不动 #batSyncAt（那里是完整的时间描述）：连点几次会把「（节流中）」
+      // 一层层叠上去。只在手动点击时给一次反馈
+      if (!silent) toast("刚刚已同步过，120 秒内不重复连接设备");
     } else if (r.inserted || r.old_inserted) {
       const [ov, cyc, daily] = await Promise.all([
         api("/api/battery/overview"),
@@ -1889,6 +1897,9 @@ function paintBatteryStatus(ov) {
     $("#batHint").textContent = ov.time_to_full_sec
       ? `预计 ${fmtLongDuration(ov.time_to_full_sec)} 后充满`
       : "充电中（暂无可估算的充电速率）";
+  } else if (charging === "full") {
+    $("#batLabel").textContent = "已充满";
+    $("#batHint").textContent = "插着电，电量已满";
   } else {
     $("#batLabel").textContent = `${ov.capacity}% · 电池供电中`;
     $("#batHint").textContent = ov.remaining_sec
